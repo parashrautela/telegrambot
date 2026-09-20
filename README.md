@@ -54,10 +54,14 @@ The account owner's Gmail address is not used by the application. Only the servi
    ```sh
    npm run setup-sheet
    npm run seed-workflow
-   npm run start
+   npm run start:local
    ```
 
 No npm install is required: this starter uses Node's built-in `fetch` and `crypto` APIs.
+
+### Railway deployment
+
+Railway does not use the local `.env` file. Add the same values from `.env.example` in the Railway service's **Variables** screen, then use the default `npm start` command. Keep `.env` only on your local machine.
 
 ## Sheet setup after bootstrapping
 
