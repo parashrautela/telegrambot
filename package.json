@@ -1,0 +1,13 @@
+{
+  "name": "studio-iksha-telegram-ops",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup-sheet": "node --env-file=.env src/setup-sheet.js",
+    "seed-workflow": "node --env-file=.env src/seed-workflow.js",
+    "create-demo-project": "node --env-file=.env src/create-demo-project.js",
+    "start": "node --env-file=.env src/index.js",
+    "check": "node --check src/index.js && node --check src/sheets.js && node --check src/telegram.js"
+  }
+}
