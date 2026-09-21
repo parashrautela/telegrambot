@@ -12,7 +12,11 @@ const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&':
 const projectCreation = new Map();
 const aiDrafts = new Map();
 const groupBotProfile = await getMe(config.groupToken);
+const leaderBotProfile = await getMe(config.leaderToken);
 const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
+
+console.log(`Project group bot connected as @${groupBotProfile.username}.`);
+console.log(`Founder bot connected as @${leaderBotProfile.username}; founder Telegram ID is ${config.founderTelegramId}.`);
 
 const parseDate = (input) => {
   const trimmed = input.trim();
@@ -159,7 +163,11 @@ async function groupCommand(message) {
 }
 
 async function leaderCommand(message) {
-  if (String(message.from.id) !== config.founderTelegramId) return;
+  if (String(message.from.id) !== config.founderTelegramId) {
+    console.warn(`Ignoring founder-bot message from unauthorized Telegram ID ${message.from.id}.`);
+    return;
+  }
+  console.log(`Founder bot received ${message.text?.trim().split(/\s+/)[0] || 'a message'} from the configured founder.`);
   const command = message.text?.trim().split(/\s+/)[0]?.split('@')[0];
   if (command === '/start' || command === '/help') return sendMessage(config.leaderToken, message.chat.id, `<b>Founder bot commands</b>\n\n/createproject — create a project and generate its 15-step plan\n/projects — list projects and progress\n/project P001 — view one project\n/adduser ID | Name | Role — register a team member\n/approvals — review pending requests\n/cancel — cancel the current project-creation flow`);
   if (command === '/cancel') {
