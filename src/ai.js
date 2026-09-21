@@ -89,6 +89,7 @@ export async function interpretFounderRequest(message) {
   });
   if (!response.ok) throw new Error(`OpenAI request failed: ${await response.text()}`);
   const payload = await response.json();
-  if (!payload.output_text) throw new Error('OpenAI returned no structured output.');
-  return JSON.parse(payload.output_text);
+  const outputText = payload.output?.flatMap((item) => item.content ?? []).find((item) => item.type === 'output_text')?.text;
+  if (!outputText) throw new Error(`OpenAI returned no structured output (status: ${payload.status ?? 'unknown'}).`);
+  return JSON.parse(outputText);
 }

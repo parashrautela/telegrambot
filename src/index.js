@@ -434,6 +434,10 @@ poll(config.groupToken, 'Project group bot', async (update) => {
     if (isMention || isReplyToBot) {
       const project = await requireProject(update.message.chat, config.groupToken);
       const naturalLanguageUpdate = text.replaceAll(new RegExp(groupBotMention.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '').trim();
+      if (project && /\b(status|update|progress|going)\b/i.test(naturalLanguageUpdate)) {
+        await sendMessage(config.groupToken, update.message.chat.id, await projectTldr(project));
+        return;
+      }
       if (project && naturalLanguageUpdate) await interpretNaturalLanguage(update.message, project, naturalLanguageUpdate);
     }
   }
