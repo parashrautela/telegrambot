@@ -1,6 +1,6 @@
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
-import { aiEnabled, interpretProjectUpdate } from './ai.js';
+import { aiEnabled, interpretFounderRequest, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { answerCallback, getMe, poll, sendMessage } from './telegram.js';
 
@@ -30,6 +30,38 @@ async function nextProjectId() {
   let number = 1;
   while (projectIds.includes(`P${String(number).padStart(3, '0')}`)) number += 1;
   return `P${String(number).padStart(3, '0')}`;
+}
+
+async function showProjects(chatId) {
+  const projects = await store.rows('Projects');
+  const lines = await Promise.all(projects.map(async (project) => {
+    const tasks = await store.tasksForProject(project.ProjectID);
+    const completed = tasks.filter((task) => task.Status === 'Completed').length;
+    return `• <b>${escape(project.ProjectName)}</b> — ${completed}/${tasks.length} tasks complete · ${escape(project.Status || 'Active')}`;
+  }));
+  return sendMessage(config.leaderToken, chatId, lines.length ? `<b>Projects</b>\n\n${lines.join('\n')}` : 'No projects exist yet. Say “start a project” whenever you are ready.');
+}
+
+async function continueProjectCreation(chatId, session) {
+  projectCreation.set(chatId, session);
+  if (!session.projectName) {
+    session.step = 'name';
+    return sendMessage(config.leaderToken, chatId, 'Sure — what should I call the project?');
+  }
+  if (!session.clientName) {
+    session.step = 'client';
+    return sendMessage(config.leaderToken, chatId, 'Who is the client?');
+  }
+  if (!session.startDateText) {
+    session.step = 'date';
+    return sendMessage(config.leaderToken, chatId, 'What is the start date? You can say “22 September” or write <code>2026-09-22</code>.');
+  }
+  session.step = 'group';
+  const groups = await store.availableGroups();
+  if (!groups.length) return sendMessage(config.leaderToken, chatId, 'I have the project details. Add the group bot to the project group, send <code>/start</code> there, then tell me “continue creating the project.”');
+  return sendMessage(config.leaderToken, chatId, `Ready to set up <b>${escape(session.projectName)}</b>. Which group should I connect?`, {
+    inline_keyboard: groups.slice(0, 10).map((group) => [{ text: group.GroupTitle, callback_data: `create_group:${group.GroupChatID}` }]),
+  });
 }
 
 async function requireProject(chat, token) {
@@ -175,8 +207,7 @@ async function leaderCommand(message) {
     return sendMessage(config.leaderToken, message.chat.id, 'Cancelled.');
   }
   if (command === '/createproject' || command === '/newproject') {
-    projectCreation.set(message.chat.id, { step: 'name' });
-    return sendMessage(config.leaderToken, message.chat.id, 'Let’s create a project. What is the <b>project name</b>?');
+    return continueProjectCreation(message.chat.id, {});
   }
   if (command === '/project') {
     const projectId = message.text.trim().split(/\s+/)[1];
@@ -198,13 +229,7 @@ async function leaderCommand(message) {
     return sendMessage(config.leaderToken, message.chat.id, `✅ Registered <b>${escape(name)}</b> as ${escape(role)}.`);
   }
   if (command === '/projects') {
-    const projects = await store.rows('Projects');
-    const lines = await Promise.all(projects.map(async (project) => {
-      const tasks = await store.tasksForProject(project.ProjectID);
-      const completed = tasks.filter((task) => task.Status === 'Completed').length;
-      return `• <b>${escape(project.ProjectName)}</b> — ${completed}/${tasks.length} tasks complete · ${escape(project.Status || 'Active')}`;
-    }));
-    return sendMessage(config.leaderToken, message.chat.id, lines.length ? `<b>Projects</b>\n\n${lines.join('\n')}` : 'No projects exist in the shared Sheet yet.');
+    return showProjects(message.chat.id);
   }
   if (command === '/approvals') {
     const approvals = await store.approvals();
@@ -233,6 +258,7 @@ async function leaderCreationReply(message) {
   const session = projectCreation.get(message.chat.id);
   if (!session || message.text?.startsWith('/')) return;
   const reply = message.text.trim();
+  if (session.step === 'group') return continueProjectCreation(message.chat.id, session);
   if (session.step === 'name') {
     session.projectName = reply; session.step = 'client';
     return sendMessage(config.leaderToken, message.chat.id, 'Who is the <b>client</b>?');
@@ -244,12 +270,31 @@ async function leaderCreationReply(message) {
   if (session.step === 'date') {
     const parsedDate = parseDate(reply);
     if (!parsedDate) return sendMessage(config.leaderToken, message.chat.id, 'I could not read that date. Try <code>2026-09-20</code>.');
-    session.startDateText = parsedDate; session.step = 'group';
-    const groups = await store.availableGroups();
-    if (!groups.length) return sendMessage(config.leaderToken, message.chat.id, 'No unlinked groups are registered yet. Add the group bot to a project group, send /start there, then use /createproject again.');
-    return sendMessage(config.leaderToken, message.chat.id, 'Which project group should be linked?', {
-      inline_keyboard: groups.slice(0, 10).map((group) => [{ text: group.GroupTitle, callback_data: `create_group:${group.GroupChatID}` }]),
-    });
+    session.startDateText = parsedDate;
+    return continueProjectCreation(message.chat.id, session);
+  }
+}
+
+async function leaderNaturalLanguageReply(message) {
+  if (String(message.from.id) !== config.founderTelegramId) return;
+  const session = projectCreation.get(message.chat.id);
+  if (session) return leaderCreationReply(message);
+  if (!aiEnabled()) return sendMessage(config.leaderToken, message.chat.id, 'I can help with projects, but AI is not configured yet. You can still use /help.');
+  try {
+    const result = await interpretFounderRequest(message.text.trim());
+    if (result.intent === 'start_project') {
+      return continueProjectCreation(message.chat.id, {
+        projectName: result.project_name || '', clientName: result.client_name || '', startDateText: parseDate(result.start_date) || '',
+      });
+    }
+    if (result.intent === 'list_projects') return showProjects(message.chat.id);
+    if (result.intent === 'project_status' && result.project_id) {
+      return leaderCommand({ ...message, text: `/project ${result.project_id}` });
+    }
+    return sendMessage(config.leaderToken, message.chat.id, result.reply || 'I can start a project, list projects, or check a project status. What would you like to do?');
+  } catch (error) {
+    console.error('Founder AI interpretation error:', error.message);
+    return sendMessage(config.leaderToken, message.chat.id, 'I could not understand that just now. Please try again, or use /help.');
   }
 }
 
@@ -308,6 +353,6 @@ poll(config.groupToken, 'Project group bot', async (update) => {
 });
 poll(config.leaderToken, 'Founder bot', async (update) => {
   if (update.message?.text?.startsWith('/')) await leaderCommand(update.message);
-  else if (update.message?.text) await leaderCreationReply(update.message);
+  else if (update.message?.text) await leaderNaturalLanguageReply(update.message);
   if (update.callback_query) await leaderCallback(update.callback_query);
 });
