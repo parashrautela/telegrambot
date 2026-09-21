@@ -1,113 +1,185 @@
-# Studio Iksha Telegram Operations — pilot
+# Studio Iksha Telegram Operations
 
-This is a deliberately small, working foundation for the project workflow system:
+Studio Iksha is a two-bot Telegram workspace for construction and interior projects. The founder manages projects privately; teams work inside one Telegram group per project. Google Sheets is the system of record.
 
-- **Founder bot**: private admin view and schedule-change approvals for Parash.
-- **Project group bot**: used in a project Telegram group by the designer, architect, client, and site team.
-- **One Google Sheet**: the shared system of record for projects, workflow templates, generated tasks, users, approvals, and audit history.
+## Features
 
-The build does not make Telegram the database. It records every operational action in the Sheet, and the Calendar/rescheduling engine can be added on top of the same task model.
+- Project creation from the built-in 15-step house workflow.
+- Google Sheets tracking for projects, tasks, dates, delays, issues, approvals, users, onboarding, and audit logs.
+- Plain-English founder requests, including “start a project,” “show my projects,” and project-status questions.
+- Group updates through commands or a plain-English mention of the group bot.
+- AI drafts require confirmation before changing a task; delay requests also need founder approval.
+- New-member onboarding: project TLDR in the group, private founder role approval, and a pending state until approved.
+- Railway-ready, always-on deployment.
 
-## Current pilot flow
-
-1. A team member runs `/tasks` in the project group.
-2. They run `/done TASK_ID` when their task is complete, or `/delay TASK_ID DAYS reason` if it slips.
-3. A delay creates an approval request for the project lead or founder.
-4. The founder receives an Approve / Reject message in the private bot.
-5. The decision, actor, and reason are stored in the shared Sheet and posted back to the project group.
-
-## Member onboarding
-
-Make the project group bot an administrator in every project group. Telegram only delivers member-join updates to administrator bots. When someone joins a linked project group, the bot posts a project TLDR, notifies the founder privately, and keeps that member pending until the founder assigns a name and role. The new member can use the profile button to open the founder bot; Telegram bots cannot initiate a private conversation with a user who has not started the bot.
-
-`/issue TASK_ID description` records an issue and informs the project lead. The next increment is to create a rework task from an approved issue, then add dependency-aware rescheduling and Calendar sync.
-
-## Intelligence layer
-
-The first AI feature is intentionally a **drafting layer**, not a decision-maker. In a project group, mention the group bot or reply to one of its messages:
+## Architecture
 
 ```text
-@Jejdidjududh_bot Tiles have not arrived, so the kitchen flooring will be delayed by three days.
+Founder ── private chat ── Founder bot ──┐
+                                         ├── Google Sheets
+Project team ── project group ── Group bot ┘
 ```
 
-The bot matches the note to the project task list and proposes a structured delay, issue, or completion. It then shows <b>Confirm</b> and <b>Cancel</b> buttons. It never changes the Sheet from an AI response alone, preserving the audit trail and founder approval flow.
+| Component | Purpose |
+| --- | --- |
+| Founder bot | Project setup, project status, approvals, and member-role approval. |
+| Group bot | Group onboarding, task updates, delays, and issues. |
+| Google Sheets | Persistent project data and audit trail. |
+| OpenAI API | Turns supported plain-English messages into safe structured drafts. |
+| Railway | Production hosting. |
 
-Add a newly created OpenAI API key locally in `.env` as `OPENAI_API_KEY`, then restart the bot. The starter defaults to `gpt-5-mini`, a cost-optimized model that supports Structured Outputs. [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-5-mini)
+## Everyday flows
+
+### Create a project
+
+1. Create a Telegram group and add the group bot.
+2. Send `/start` in that group to register it.
+3. In the founder bot, write:
+
+   ```text
+   Create a project called Parash ka ghar for Parash, starting 22 September
+   ```
+
+4. Answer any missing questions and select the registered group.
+5. The project and its default tasks are created in Google Sheets.
+
+### Report an update
+
+In the project group, mention the group bot:
+
+```text
+@Ikshagroup123_bot painting work is delayed by 2 days because of rain
+```
+
+The bot proposes a completion, delay, or issue. Press **Confirm** to submit it. Delays are sent to the founder for approval.
+
+### Onboard a new member
+
+When a person joins a linked project group, the group bot posts a TLDR with progress, current stage, current task, blockers, and next milestone. The founder receives an **Assign role** button and replies:
+
+```text
+Rahul Sharma | Electrical contractor
+```
+
+The member is then saved in Google Sheets and activated. New members remain pending until the founder assigns their profile.
+
+> Make the group bot an administrator in every project group. Telegram only delivers member-join events to administrator bots.
+
+## Founder bot
+
+Use normal English for common actions, or these commands as a fallback:
+
+| Command | Purpose |
+| --- | --- |
+| `/start`, `/help` | Show help. |
+| `/createproject` | Guided project creation. |
+| `/projects` | List projects. |
+| `/project P001` | View a project. |
+| `/adduser ID \| Name \| Role` | Add or update a user. |
+| `/approvals` | List pending approvals. |
+| `/cancel` | Cancel project creation. |
+
+## Group bot
+
+| Command or message | Purpose |
+| --- | --- |
+| `/start` | Register a group or confirm its project link. |
+| `/tasks` | List active tasks. |
+| `/done TASK_ID` | Mark a permitted task complete. |
+| `/delay TASK_ID DAYS reason` | Request a delay approval. |
+| `/issue TASK_ID description` | Record an issue. |
+| `@group_bot plain-English update` | Create a confirmable action draft. |
+
+## Google Sheets tabs
+
+| Tab | Contents |
+| --- | --- |
+| `Projects` | Project identity, dates, leader, and group link. |
+| `WorkflowTemplates` | Reusable project workflow. |
+| `Tasks` | Generated task plan and status. |
+| `Users` | Active Telegram users and roles. |
+| `MemberOnboarding` | Join events and founder approvals. |
+| `GroupRegistry` | Groups available for project linking. |
+| `Approvals` | Delay approvals. |
+| `AuditLog` | Operational history. |
 
 ## Setup
 
-### Security first
+### Requirements
 
-Never paste Telegram tokens or Google service-account private keys into a chat, commit, or screenshot. Store them only in the local `.env` file, which is excluded by `.gitignore`.
+- Node.js 20+.
+- Two bots created with `@BotFather`.
+- A Google Cloud service account with Google Sheets API enabled.
+- A Google Sheet shared as **Editor** with the service-account email.
+- An OpenAI API key for plain-English interpretation.
 
-If a secret was shared outside the local machine, revoke and replace it before starting the bot:
+Copy `.env.example` to `.env` and set:
 
-- In **@BotFather**, use `/revoke` for each exposed bot, then copy the replacement token into `.env`.
-- In **Google Cloud Console → IAM & Admin → Service Accounts → Keys**, delete the exposed JSON key and create a replacement JSON key.
-
-The account owner's Gmail address is not used by the application. Only the service-account email needs Sheet access.
-
-1. Create two bots with Telegram's **@BotFather**.
-   - `StudioIksha Founder` — speak to Parash privately.
-   - `StudioIksha Project` — add this bot to every project group.
-2. In Google Cloud, enable **Google Sheets API** and create a service account.
-3. Create a blank Google Spreadsheet and share it as **Editor** with the service-account email.
-4. Copy `.env.example` to `.env` and add the values. Use `\n` inside `GOOGLE_PRIVATE_KEY`.
-5. Run:
-
-   ```sh
-   npm run setup-sheet
-   npm run seed-workflow
-   npm run start:local
-   ```
-
-No npm install is required: this starter uses Node's built-in `fetch` and `crypto` APIs.
-
-### Railway deployment
-
-Railway does not use the local `.env` file. Add the same values from `.env.example` in the Railway service's **Variables** screen, then use the default `npm start` command. Keep `.env` only on your local machine.
-
-## Sheet setup after bootstrapping
-
-Add one `Projects` row with a unique `ProjectID`, project name, and the Telegram **group chat ID**. You can get the ID by adding the group bot and sending `/start` in that group; its reply prints the chat ID.
-
-Add rows in `Users` for every operational user:
-
-| TelegramUserID | Name | Role | Active |
-| --- | --- | --- | --- |
-| 123456789 | Parash | Founder | Yes |
-| … | Designer name | Designer | Yes |
-
-### Create the first pilot project
-
-After the group bot has been added to a test Telegram group, send `/start` in the group. Copy the displayed group chat ID, then run:
-
-```sh
-npm run create-demo-project -- P001 "Demo House" "Demo Client" 2026-09-20 -1001234567890
+```dotenv
+LEADER_BOT_TOKEN=
+GROUP_BOT_TOKEN=
+FOUNDER_TELEGRAM_ID=
+GOOGLE_SHEET_ID=
+GOOGLE_SERVICE_ACCOUNT_EMAIL=
+GOOGLE_PRIVATE_KEY=
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-5-mini
 ```
 
-This creates the `Projects` row and generates a sequential 15-step house-building schedule from `HOUSE-V1`. It intentionally leaves the team assignment blank; enter team members in `Users`, then add their Telegram IDs to the relevant generated task rows.
+Use the numeric ID from `@userinfobot` as `FOUNDER_TELEGRAM_ID`. Keep `\\n` escapes in `GOOGLE_PRIVATE_KEY`.
 
-## Commands
+```sh
+npm run setup-sheet
+npm run seed-workflow
+npm run check
+npm run start:local
+```
 
-### Founder bot (private)
+Do not run a local bot while Railway is polling the same token. Telegram permits only one `getUpdates` listener per token.
 
-- `/createproject` — guided project creation: name, client, start date, and project group selection.
-- `/projects` — list projects and high-level task counts.
-- `/project P001` — view progress and delays for a project.
-- `/adduser TELEGRAM_ID | Name | Role` — add or update a team member.
-- `/approvals` — list pending delay approvals.
-- `/cancel` — cancel a guided flow.
+## Railway deployment
 
-### Project group bot
+1. Connect this repository to Railway.
+2. Add the environment variables in Railway **Variables**.
+3. Use `npm start` as the start command.
+4. Keep one service replica.
+5. Promote the group bot to administrator in each project group.
 
-- `/start` — verify the group mapping and print the group chat ID.
-- `/tasks` — list active tasks for this project.
-- `/done TASK_ID` — mark an assigned task complete.
-- `/delay TASK_ID DAYS reason` — request a delay approval.
-- `/issue TASK_ID description` — record a project issue.
-- `@Jejdidjududh_bot natural-language update` — turn a plain-language note into a safe action draft; reply to the bot for the same effect.
+Railway does not read the local `.env` file.
 
-## Deliberate MVP boundaries
+## Security
 
-This first cut establishes the two-bot model, permissions, audit trail, and approval loop. It does **not** yet move downstream dates, create Calendar events, or generate rework tasks. Those actions should be implemented after the team verifies that the group interaction is comfortable in a real project.
+- Never commit or share `.env`, bot tokens, OpenAI keys, or Google private keys.
+- If a Telegram token leaks, use `@BotFather` → `/revoke`, replace it in Railway, and redeploy.
+- If a Google private key leaks, delete and replace the service-account key in Google Cloud.
+- Founder actions are restricted by `FOUNDER_TELEGRAM_ID`.
+- AI drafts are not executed until a person confirms them.
+- Operational changes are recorded in `AuditLog`.
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| Bot is silent | Check Railway logs, bot tokens, and `FOUNDER_TELEGRAM_ID`. |
+| `Conflict: terminated by other getUpdates request` | Stop other listeners; revoke and replace the token if necessary. |
+| `Telegram getMe failed: Not Found` | Replace the invalid token with the complete BotFather token. |
+| New-member onboarding does not run | Promote the group bot to administrator. |
+| Plain-English request falls back | Retry with clearer wording or use the matching command. |
+
+## Current boundaries
+
+This production pilot does not yet automatically reschedule downstream tasks, create Calendar events, create rework tasks, assign tasks from roles automatically, or offer multiple workflow templates. Planned next work includes a template library, role-to-task assignment, dependency-aware rescheduling, calendar sync, and richer group-agent conversations.
+
+## Scripts
+
+| Script | Purpose |
+| --- | --- |
+| `npm start` | Production start. |
+| `npm run start:local` | Local start with `.env`. |
+| `npm run check` | Syntax checks. |
+| `npm run setup-sheet` | Creates/updates Sheets tabs and headers. |
+| `npm run seed-workflow` | Seeds the house workflow. |
+
+## License
+
+Private project. All rights reserved.
