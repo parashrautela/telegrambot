@@ -279,6 +279,14 @@ async function leaderNaturalLanguageReply(message) {
   if (String(message.from.id) !== config.founderTelegramId) return;
   const session = projectCreation.get(message.chat.id);
   if (session) return leaderCreationReply(message);
+  const normalized = message.text.trim().toLowerCase();
+  if (/\b(start|create|make|begin|new)\b.*\bproject\b/.test(normalized)) return continueProjectCreation(message.chat.id, {});
+  if (/\b(show|list|view)\b.*\bprojects?\b/.test(normalized)) return showProjects(message.chat.id);
+  if (/\b(update|status|progress|going)\b/.test(normalized)) {
+    const projects = await store.rows('Projects');
+    const match = projects.find((project) => normalized.includes(project.ProjectName.toLowerCase()));
+    if (match) return leaderCommand({ ...message, text: `/project ${match.ProjectID}` });
+  }
   if (!aiEnabled()) return sendMessage(config.leaderToken, message.chat.id, 'I can help with projects, but AI is not configured yet. You can still use /help.');
   try {
     const result = await interpretFounderRequest(message.text.trim());
