@@ -347,6 +347,13 @@ async function leaderNaturalLanguageReply(message) {
     const projects = await store.rows('Projects');
     const match = projects.find((project) => normalized.includes(project.ProjectName.toLowerCase()));
     if (match) return leaderCommand({ ...message, text: `/project ${match.ProjectID}` });
+    const activeProjects = projects.filter((project) => project.Status !== 'Archived');
+    if (activeProjects.length === 1) return leaderCommand({ ...message, text: `/project ${activeProjects[0].ProjectID}` });
+    if (activeProjects.length > 1) {
+      const options = activeProjects.map((project) => `• <b>${escape(project.ProjectName)}</b> (<code>${escape(project.ProjectID)}</code>)`).join('\n');
+      return sendMessage(config.leaderToken, message.chat.id, `Which project would you like an update on?\n\n${options}`);
+    }
+    return sendMessage(config.leaderToken, message.chat.id, 'There are no active projects yet. Say “start a project” whenever you are ready.');
   }
   if (!aiEnabled()) return sendMessage(config.leaderToken, message.chat.id, 'I can help with projects, but AI is not configured yet. You can still use /help.');
   try {
