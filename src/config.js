@@ -18,7 +18,7 @@ export function botConfig() {
   return {
     leaderToken: required('LEADER_BOT_TOKEN'),
     groupToken: required('GROUP_BOT_TOKEN'),
-    founderTelegramId: required('FOUNDER_TELEGRAM_ID'),
+    founderTelegramId: required('FOUNDER_TELEGRAM_ID').trim(),
   };
 }
 
