@@ -11,7 +11,7 @@ export const sendMessage = (token, chatId, text, replyMarkup) => api(token, 'sen
   chat_id: chatId, text, parse_mode: 'HTML', ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
 });
 export const answerCallback = (token, callbackId, text = '') => api(token, 'answerCallbackQuery', { callback_query_id: callbackId, text });
-export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query'] });
+export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query', 'chat_member'] });
 export const getMe = (token) => api(token, 'getMe');
 
 export async function poll(token, label, onUpdate) {

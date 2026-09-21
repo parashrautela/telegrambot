@@ -16,6 +16,10 @@ The build does not make Telegram the database. It records every operational acti
 4. The founder receives an Approve / Reject message in the private bot.
 5. The decision, actor, and reason are stored in the shared Sheet and posted back to the project group.
 
+## Member onboarding
+
+Make the project group bot an administrator in every project group. Telegram only delivers member-join updates to administrator bots. When someone joins a linked project group, the bot posts a project TLDR, notifies the founder privately, and keeps that member pending until the founder assigns a name and role. The new member can use the profile button to open the founder bot; Telegram bots cannot initiate a private conversation with a user who has not started the bot.
+
 `/issue TASK_ID description` records an issue and informs the project lead. The next increment is to create a rework task from an approved issue, then add dependency-aware rescheduling and Calendar sync.
 
 ## Intelligence layer

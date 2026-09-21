@@ -11,12 +11,14 @@ const groupOnly = (chat) => ['group', 'supergroup'].includes(chat.type);
 const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
 const projectCreation = new Map();
 const aiDrafts = new Map();
+const founderRoleAssignments = new Map();
 const groupBotProfile = await getMe(config.groupToken);
 const leaderBotProfile = await getMe(config.leaderToken);
 const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
 
 console.log(`Project group bot connected as @${groupBotProfile.username}.`);
 console.log(`Founder bot connected as @${leaderBotProfile.username}; founder Telegram ID is ${config.founderTelegramId}.`);
+await store.ensureSchema();
 
 const parseDate = (input) => {
   const trimmed = input.trim();
@@ -30,6 +32,44 @@ async function nextProjectId() {
   let number = 1;
   while (projectIds.includes(`P${String(number).padStart(3, '0')}`)) number += 1;
   return `P${String(number).padStart(3, '0')}`;
+}
+
+async function projectTldr(project) {
+  const tasks = (await store.tasksForProject(project.ProjectID)).sort((left, right) => Number(left.Sequence) - Number(right.Sequence));
+  const completed = tasks.filter((task) => task.Status === 'Completed').length;
+  const current = tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
+  const issues = tasks.filter((task) => task.Status === 'Issue Reported').length;
+  const delays = tasks.filter((task) => task.Status.includes('Delay')).length;
+  const approvals = (await store.approvals()).filter((item) => item.ProjectID === project.ProjectID).length;
+  const blockers = [issues ? `${issues} reported issue${issues === 1 ? '' : 's'}` : '', delays ? `${delays} delay${delays === 1 ? '' : 's'}` : '', approvals ? `${approvals} approval${approvals === 1 ? '' : 's'} pending` : ''].filter(Boolean);
+  return [
+    `<b>Project TLDR — ${escape(project.ProjectName)}</b>`,
+    `Progress: ${completed}/${tasks.length} tasks complete`,
+    `Current stage: ${escape(current?.Stage || 'Project complete')}`,
+    `Now: ${escape(current?.TaskName || 'All planned tasks are complete')}`,
+    `Stuck on: ${blockers.length ? escape(blockers.join(' · ')) : 'No recorded blockers'}`,
+    `Next milestone: ${escape(current?.TaskName || 'Project handover')}`,
+  ].join('\n');
+}
+
+const joinedStatus = new Set(['member', 'administrator', 'restricted']);
+
+async function welcomeNewProjectMember(update) {
+  const change = update.chat_member;
+  if (!change || !groupOnly(change.chat)) return;
+  const oldStatus = change.old_chat_member?.status;
+  const newStatus = change.new_chat_member?.status;
+  const member = change.new_chat_member?.user;
+  if (!member || member.is_bot || joinedStatus.has(oldStatus) || !joinedStatus.has(newStatus)) return;
+  const project = await store.projectForGroup(change.chat.id);
+  if (!project || await store.onboardingForMember(project.ProjectID, member.id)) return;
+  const onboardingId = `ONB-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const memberName = actor(member).name;
+  await store.createOnboarding({ onboardingId, projectId: project.ProjectID, groupChatId: change.chat.id, telegramId: member.id, telegramName: memberName });
+  await store.audit({ projectId: project.ProjectID, action: 'Member joined — pending profile', actor: member.id, actorName: memberName, source: 'Telegram group bot', details: onboardingId });
+  const profileLink = `https://t.me/${leaderBotProfile.username}?start=profile_${onboardingId}`;
+  await sendMessage(config.groupToken, change.chat.id, `Welcome <b>${escape(memberName)}</b> 👋\n\nI’m setting up your project profile. Meanwhile, here is where the project stands:\n\n${await projectTldr(project)}\n\nThe founder will confirm your role shortly.`, { inline_keyboard: [[{ text: 'Set up my profile', url: profileLink }]] });
+  return sendMessage(config.leaderToken, config.founderTelegramId, `<b>New project member joined</b>\n\nName: ${escape(memberName)}\nProject: ${escape(project.ProjectName)}\nJoined: ${new Date(change.date * 1000).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nPlease assign their profile and role before they can update project tasks.`, { inline_keyboard: [[{ text: 'Assign role', callback_data: `onboard_role:${onboardingId}` }]] });
 }
 
 async function showProjects(chatId) {
@@ -195,12 +235,17 @@ async function groupCommand(message) {
 }
 
 async function leaderCommand(message) {
+  const command = message.text?.trim().split(/\s+/)[0]?.split('@')[0];
+  const startPayload = message.text?.trim().split(/\s+/)[1] || '';
   if (String(message.from.id) !== config.founderTelegramId) {
+    if (command === '/start' && startPayload.startsWith('profile_')) {
+      const onboarding = await store.onboarding(startPayload.slice('profile_'.length));
+      if (onboarding && String(onboarding.TelegramUserID) === String(message.from.id)) return sendMessage(config.leaderToken, message.chat.id, 'Thanks — the founder has been notified and will confirm your project role shortly.');
+    }
     console.warn(`Ignoring founder-bot message from unauthorized Telegram ID ${message.from.id}.`);
     return;
   }
   console.log(`Founder bot received ${message.text?.trim().split(/\s+/)[0] || 'a message'} from the configured founder.`);
-  const command = message.text?.trim().split(/\s+/)[0]?.split('@')[0];
   if (command === '/start' || command === '/help') return sendMessage(config.leaderToken, message.chat.id, `<b>Founder bot commands</b>\n\n/createproject — create a project and generate its 15-step plan\n/projects — list projects and progress\n/project P001 — view one project\n/adduser ID | Name | Role — register a team member\n/approvals — review pending requests\n/cancel — cancel the current project-creation flow`);
   if (command === '/cancel') {
     projectCreation.delete(message.chat.id);
@@ -277,6 +322,22 @@ async function leaderCreationReply(message) {
 
 async function leaderNaturalLanguageReply(message) {
   if (String(message.from.id) !== config.founderTelegramId) return;
+  const onboardingId = founderRoleAssignments.get(message.chat.id);
+  if (onboardingId) {
+    const [name, role] = message.text.split('|').map((part) => part?.trim());
+    if (!name || !role) return sendMessage(config.leaderToken, message.chat.id, 'Please use <code>Full name | Role</code>, for example <code>Rahul Sharma | Electrical contractor</code>.');
+    const onboarding = await store.onboarding(onboardingId);
+    if (!onboarding || onboarding.Status !== 'Pending') {
+      founderRoleAssignments.delete(message.chat.id);
+      return sendMessage(config.leaderToken, message.chat.id, 'That member profile is no longer pending.');
+    }
+    await store.approveOnboarding(onboarding, { name, role, founderTelegramId: config.founderTelegramId });
+    await store.audit({ projectId: onboarding.ProjectID, action: 'Member profile approved', actor: config.founderTelegramId, actorName: 'Founder', source: 'Telegram founder bot', details: `${name} | ${role}` });
+    founderRoleAssignments.delete(message.chat.id);
+    await sendMessage(config.groupToken, onboarding.GroupChatID, `✅ <b>${escape(name)}</b> is now active on this project as <b>${escape(role)}</b>.`);
+    try { await sendMessage(config.leaderToken, onboarding.TelegramUserID, `Your project profile is active. Role: <b>${escape(role)}</b>.`); } catch { console.log('New member has not started the founder bot yet.'); }
+    return sendMessage(config.leaderToken, message.chat.id, `✅ ${escape(name)} is now active as ${escape(role)}.`);
+  }
   const session = projectCreation.get(message.chat.id);
   if (session) return leaderCreationReply(message);
   const normalized = message.text.trim().toLowerCase();
@@ -307,6 +368,14 @@ async function leaderNaturalLanguageReply(message) {
 }
 
 async function leaderCallback(callback) {
+  if (callback.data.startsWith('onboard_role:')) {
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can assign project roles.');
+    const onboarding = await store.onboarding(callback.data.slice('onboard_role:'.length));
+    if (!onboarding || onboarding.Status !== 'Pending') return answerCallback(config.leaderToken, callback.id, 'This member profile is no longer pending.');
+    founderRoleAssignments.set(callback.message.chat.id, onboarding.OnboardingID);
+    await answerCallback(config.leaderToken, callback.id, 'Reply with name and role.');
+    return sendMessage(config.leaderToken, callback.message.chat.id, `Reply with this member’s profile in one line:\n<code>Full name | Role</code>\n\nExample: <code>Rahul Sharma | Electrical contractor</code>`);
+  }
   if (callback.data.startsWith('create_group:')) {
     if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can create a project.');
     const session = projectCreation.get(callback.message.chat.id);
@@ -362,6 +431,7 @@ poll(config.groupToken, 'Project group bot', async (update) => {
     }
   }
   if (update.callback_query) await groupCallback(update.callback_query);
+  if (update.chat_member) await welcomeNewProjectMember(update);
 });
 poll(config.leaderToken, 'Founder bot', async (update) => {
   if (update.message?.text?.startsWith('/')) await leaderCommand(update.message);

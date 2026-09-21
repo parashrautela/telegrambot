@@ -15,6 +15,10 @@ export const SHEETS = {
     'PredecessorTaskID', 'CalendarEventID', 'LastUpdatedAt', 'LastUpdatedBy',
   ],
   Users: ['TelegramUserID', 'Name', 'Role', 'Active'],
+  MemberOnboarding: [
+    'OnboardingID', 'ProjectID', 'GroupChatID', 'TelegramUserID', 'TelegramName',
+    'JoinedAt', 'Status', 'AssignedName', 'AssignedRole', 'ApprovedAt', 'ApprovedByTelegramID',
+  ],
   GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status'],
   Approvals: [
     'ApprovalID', 'ProjectID', 'TaskID', 'RequestType', 'RequestedByTelegramID',
