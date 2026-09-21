@@ -346,6 +346,10 @@ async function leaderCallback(callback) {
 }
 
 poll(config.groupToken, 'Project group bot', async (update) => {
+  if (update.message?.text) {
+    const mentioned = update.message.text.toLowerCase().includes(groupBotMention);
+    console.log(`Group bot received update ${update.update_id} in ${update.message.chat.type}; mentioned: ${mentioned}; command: ${update.message.text.startsWith('/')}.`);
+  }
   if (update.message?.text?.startsWith('/')) await groupCommand(update.message);
   else if (update.message?.text) {
     const text = update.message.text.trim();
