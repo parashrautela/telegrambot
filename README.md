@@ -78,6 +78,8 @@ For a newly created project, task generation waits until a joining member is app
 
 Selecting a plan generates only that plan’s tasks, calculates the target date, and posts a compact plan overview in the project group. Later client-side members can be approved normally; they do not replace an already assigned plan.
 
+Projects created before this feature may already have an untouched default house plan. When their first client is approved, the founder receives the same picker. Selecting an option archives the unused legacy task rows and adds new, separately identified task rows for the chosen plan. Nothing is deleted.
+
 ### Share plan resources
 
 The bot reads active rows from the `ProjectResources` tab after a plan is selected. Add one row per item:
@@ -117,6 +119,7 @@ The founder bot keeps a short, in-memory window of the recent private chat so fo
 | `/createproject` | Guided project creation. |
 | `/projects` | List projects. |
 | `/project P001` | View a project. |
+| `/plan P001` | Show plan choices for a waiting project or an untouched legacy default plan. |
 | `/adduser ID \| Name \| Role` | Add or update a user. |
 | `/role ID \| New role` | Change an active member’s role. |
 | `/approvals` | List pending approvals. |

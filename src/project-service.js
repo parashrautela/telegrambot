@@ -33,23 +33,37 @@ export async function createProjectShell({ store, projectId, projectName, client
   return { status: 'Awaiting client plan' };
 }
 
-export async function assignWorkflowToProject({ store, project, workflowId, clientName = '', actorTelegramId = '' }) {
+export async function assignWorkflowToProject({ store, project, workflowId, clientName = '', actorTelegramId = '', replaceUntouchedLegacyPlan = false }) {
   const existingTasks = await store.tasksForProject(project.ProjectID);
-  if (existingTasks.length) throw new Error('This project already has a workflow assigned.');
+  if (existingTasks.length && !replaceUntouchedLegacyPlan) throw new Error('This project already has a workflow assigned.');
+  if (replaceUntouchedLegacyPlan && existingTasks.some((task) => task.WorkflowID !== 'HOUSE-V1' || task.Status !== 'Pending')) {
+    throw new Error('Only an untouched legacy house plan can be replaced.');
+  }
   const workflow = (await store.rows('WorkflowTemplates'))
     .filter((row) => row.WorkflowID === workflowId)
     .sort((left, right) => Number(left.Sequence) - Number(right.Sequence));
   if (!workflow.length) throw new Error(`${workflowId} is missing from WorkflowTemplates.`);
   const startDate = validStartDate(project.StartDate);
   const targetEndDate = dateText(plusDays(startDate, workflow.reduce((total, template) => total + Number(template.DurationDays), 0) - 1));
+  if (replaceUntouchedLegacyPlan) {
+    for (const task of existingTasks) {
+      await store.updateRow('Tasks', task.rowNumber, {
+        Status: 'Archived — Superseded plan',
+        ApprovalStatus: 'Closed',
+        LastUpdatedAt: new Date().toISOString(),
+        LastUpdatedBy: String(actorTelegramId || 'System'),
+      });
+    }
+  }
+  const taskIdPrefix = existingTasks.length ? `${project.ProjectID}-${workflowId.split('-')[0]}` : project.ProjectID;
   let cursor = startDate;
   for (const template of workflow) {
     const duration = Number(template.DurationDays);
     const plannedStart = cursor;
     const plannedEnd = plusDays(plannedStart, duration - 1);
-    const predecessor = template.PredecessorTemplateID ? taskId(project.ProjectID, Number(template.PredecessorTemplateID)) : '';
+    const predecessor = template.PredecessorTemplateID ? taskId(taskIdPrefix, Number(template.PredecessorTemplateID)) : '';
     await store.append('Tasks', {
-      TaskID: taskId(project.ProjectID, Number(template.Sequence)), ProjectID: project.ProjectID,
+      TaskID: taskId(taskIdPrefix, Number(template.Sequence)), ProjectID: project.ProjectID,
       WorkflowID: template.WorkflowID, TemplateID: `${template.WorkflowID}-${template.Sequence}`,
       Sequence: template.Sequence, Stage: template.Stage, TaskName: template.TaskName,
       AssignedRole: template.DefaultRole, Status: 'Pending',
@@ -64,11 +78,11 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
     ClientName: clientName || project.ClientName,
     Status: 'Active',
     TargetEndDate: targetEndDate,
-    Notes: `Workflow ${workflowId} assigned after client onboarding.`,
+    Notes: `Workflow ${workflowId} assigned after client onboarding${replaceUntouchedLegacyPlan ? '; untouched legacy HOUSE-V1 tasks archived.' : ''}`,
   });
   await store.audit({
-    projectId: project.ProjectID, action: 'Workflow assigned', newValue: `${workflowId}; ${workflow.length} tasks generated`,
-    actor: actorTelegramId || 'System', actorName: 'Founder', source: 'Project generator', details: `Target end ${targetEndDate}`,
+    projectId: project.ProjectID, action: replaceUntouchedLegacyPlan ? 'Legacy workflow replaced' : 'Workflow assigned', newValue: `${workflowId}; ${workflow.length} tasks generated`,
+    actor: actorTelegramId || 'System', actorName: 'Founder', source: 'Project generator', details: `Target end ${targetEndDate}${replaceUntouchedLegacyPlan ? `; ${existingTasks.length} legacy task(s) archived` : ''}`,
   });
   return { taskCount: workflow.length, targetEndDate, workflow };
 }

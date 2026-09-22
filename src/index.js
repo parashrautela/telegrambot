@@ -122,8 +122,13 @@ async function shareWorkflowResources(project, workflowId) {
   }
 }
 
-async function askFounderForPlan({ project, clientName }) {
-  return sendMessage(config.leaderToken, config.founderTelegramId, `<b>Client profile complete</b>\n\n${escape(clientName)} is now marked as the client for <b>${escape(project.ProjectName)}</b>. Which plan should we assign?\n\nThe selected plan will generate the project tasks and share its linked resources with the group.`, {
+function isUntouchedLegacyPlan(project, tasks) {
+  return project.Notes === 'Pilot project generated from HOUSE-V1.' && tasks.length > 0 && tasks.every((task) => task.WorkflowID === 'HOUSE-V1' && task.Status === 'Pending');
+}
+
+async function askFounderForPlan({ project, clientName, replaceUntouchedLegacyPlan = false }) {
+  const legacyNote = replaceUntouchedLegacyPlan ? '\n\nThis project has an untouched legacy house plan. Choosing an option will archive those unused task records and generate the selected plan; nothing is deleted.' : '';
+  return sendMessage(config.leaderToken, config.founderTelegramId, `<b>Client profile complete</b>\n\n${escape(clientName)} is now marked as the client for <b>${escape(project.ProjectName)}</b>. Which plan should we assign?\n\nThe selected plan will generate the project tasks and share its linked resources with the group.${legacyNote}`, {
     inline_keyboard: WORKFLOW_OPTIONS.map((option) => [{ text: option.label, callback_data: `choose_plan:${project.ProjectID}:${option.id}` }]),
   });
 }
@@ -367,7 +372,7 @@ async function leaderCommand(message) {
     return;
   }
   console.log(`Founder bot received ${message.text?.trim().split(/\s+/)[0] || 'a message'} from the configured founder.`);
-  if (command === '/start' || command === '/help') return sendMessage(config.leaderToken, message.chat.id, `<b>Founder bot commands</b>\n\n/createproject — create a project and generate its 15-step plan\n/projects — list projects and progress\n/project P001 — view one project\n/adduser ID | Name | Role — register a team member\n/approvals — review pending requests\n/cancel — cancel the current project-creation flow`);
+  if (command === '/start' || command === '/help') return sendMessage(config.leaderToken, message.chat.id, `<b>Founder bot commands</b>\n\n/createproject — create a project shell\n/plan P001 — choose a plan for a waiting or untouched legacy project\n/projects — list projects and progress\n/project P001 — view one project\n/adduser ID | Name | Role — register a team member\n/approvals — review pending requests\n/cancel — cancel the current project-creation flow`);
   if (command === '/cancel') {
     projectCreation.delete(message.chat.id);
     return sendMessage(config.leaderToken, message.chat.id, 'Cancelled.');
@@ -384,6 +389,16 @@ async function leaderCommand(message) {
     const completed = tasks.filter((task) => task.Status === 'Completed').length;
     const delayed = tasks.filter((task) => task.Status.includes('Delay') || task.Status.includes('Delayed')).length;
     return sendMessage(config.leaderToken, message.chat.id, `<b>${escape(project.ProjectName)}</b> (<code>${escape(project.ProjectID)}</code>)\nClient: ${escape(project.ClientName)}\nStatus: ${escape(project.Status)}\nProgress: ${completed}/${tasks.length} complete\nDelays: ${delayed}\nTarget end: ${escape(project.TargetEndDate || 'Not set')}`);
+  }
+  if (command === '/plan') {
+    const projectId = message.text.trim().split(/\s+/)[1];
+    if (!projectId) return sendMessage(config.leaderToken, message.chat.id, 'Usage: <code>/plan P001</code>');
+    const project = await store.projectById(projectId);
+    if (!project) return sendMessage(config.leaderToken, message.chat.id, 'Project not found.');
+    const tasks = await store.tasksForProject(projectId);
+    const legacyPlan = isUntouchedLegacyPlan(project, tasks);
+    if (tasks.length && !legacyPlan) return sendMessage(config.leaderToken, message.chat.id, 'This project already has active work, so its plan cannot be replaced automatically.');
+    return askFounderForPlan({ project, clientName: project.ClientName || 'The client', replaceUntouchedLegacyPlan: legacyPlan });
   }
   if (command === '/adduser') {
     const raw = message.text.slice(message.text.indexOf(' ') + 1);
@@ -465,8 +480,10 @@ async function leaderNaturalLanguageReply(message) {
     await sendMessage(config.groupToken, onboarding.GroupChatID, `✅ <b>${escape(name)}</b> is now active on this project as <b>${escape(role)}</b>.`);
     try { await sendMessage(config.leaderToken, onboarding.TelegramUserID, `Your project profile is active. Role: <b>${escape(role)}</b>.`); } catch { console.log('New member has not started the founder bot yet.'); }
     const project = await store.projectById(onboarding.ProjectID);
-    if (project && /\bclient\b/i.test(role) && !(await store.tasksForProject(project.ProjectID)).length) {
-      await askFounderForPlan({ project, clientName: name });
+    const projectTasks = project ? await store.tasksForProject(project.ProjectID) : [];
+    const legacyPlan = project && isUntouchedLegacyPlan(project, projectTasks);
+    if (project && /\bclient\b/i.test(role) && (!projectTasks.length || legacyPlan)) {
+      await askFounderForPlan({ project, clientName: name, replaceUntouchedLegacyPlan: legacyPlan });
       return sendMessage(config.leaderToken, message.chat.id, `✅ ${escape(name)} is now active as ${escape(role)}. I’ve also asked which workflow to assign.`);
     }
     return sendMessage(config.leaderToken, message.chat.id, `✅ ${escape(name)} is now active as ${escape(role)}.`);
@@ -529,10 +546,12 @@ async function leaderCallback(callback) {
     const option = WORKFLOW_OPTIONS.find((item) => item.id === workflowId);
     const project = await store.projectById(projectId);
     if (!option || !project) return answerCallback(config.leaderToken, callback.id, 'That project plan is no longer available.');
-    if ((await store.tasksForProject(projectId)).length) return answerCallback(config.leaderToken, callback.id, 'This project already has a plan assigned.');
+    const existingTasks = await store.tasksForProject(projectId);
+    const legacyPlan = isUntouchedLegacyPlan(project, existingTasks);
+    if (existingTasks.length && !legacyPlan) return answerCallback(config.leaderToken, callback.id, 'This project already has active work, so its plan cannot be replaced automatically.');
     try {
       const { assignWorkflowToProject } = await import('./project-service.js');
-      const result = await assignWorkflowToProject({ store, project, workflowId, actorTelegramId: config.founderTelegramId });
+      const result = await assignWorkflowToProject({ store, project, workflowId, actorTelegramId: config.founderTelegramId, replaceUntouchedLegacyPlan: legacyPlan });
       await answerCallback(config.leaderToken, callback.id, 'Project plan assigned.');
       await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(option.label)}</b> assigned to <b>${escape(project.ProjectName)}</b>.\n${result.taskCount} tasks generated. Planned finish: ${escape(result.targetEndDate)}.`);
       await sendMessage(config.groupToken, project.GroupChatID, `<b>Project plan assigned — ${escape(option.label)}</b>\n\n${planOverview(result.workflow)}\n\n${result.taskCount} tasks are now active. Use /tasks to see the full plan.`);
