@@ -76,6 +76,7 @@ Use normal English for common actions, or these commands as a fallback:
 | `/projects` | List projects. |
 | `/project P001` | View a project. |
 | `/adduser ID \| Name \| Role` | Add or update a user. |
+| `/role ID \| New role` | Change an active member’s role. |
 | `/approvals` | List pending approvals. |
 | `/cancel` | Cancel project creation. |
 

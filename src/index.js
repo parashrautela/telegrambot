@@ -82,6 +82,19 @@ async function showProjects(chatId) {
   return sendMessage(config.leaderToken, chatId, lines.length ? `<b>Projects</b>\n\n${lines.join('\n')}` : 'No projects exist yet. Say “start a project” whenever you are ready.');
 }
 
+async function changeUserRole(chatId, user, role) {
+  await store.updateRow('Users', user.rowNumber, { Role: role, Active: 'Yes' });
+  return sendMessage(config.leaderToken, chatId, `✅ Updated <b>${escape(user.Name)}</b> to <b>${escape(role)}</b>.`);
+}
+
+async function changeRoleByName(chatId, name, role) {
+  const normalizedName = name.trim().toLowerCase();
+  const matches = (await store.activeUsers()).filter((user) => user.Name.toLowerCase() === normalizedName || user.Name.toLowerCase().includes(normalizedName));
+  if (matches.length === 1) return changeUserRole(chatId, matches[0], role);
+  if (matches.length > 1) return sendMessage(config.leaderToken, chatId, `I found more than one active member matching “${escape(name)}”. Use <code>/role TELEGRAM_ID | New role</code> instead.`);
+  return sendMessage(config.leaderToken, chatId, `I could not find an active member named “${escape(name)}”. Use <code>/role TELEGRAM_ID | New role</code> instead.`);
+}
+
 async function continueProjectCreation(chatId, session) {
   projectCreation.set(chatId, session);
   if (!session.projectName) {
@@ -273,6 +286,13 @@ async function leaderCommand(message) {
     else await store.append('Users', { TelegramUserID: telegramId, Name: name, Role: role, Active: 'Yes' });
     return sendMessage(config.leaderToken, message.chat.id, `✅ Registered <b>${escape(name)}</b> as ${escape(role)}.`);
   }
+  if (command === '/role') {
+    const raw = message.text.slice(message.text.indexOf(' ') + 1);
+    const [telegramId, role] = raw.split('|').map((part) => part?.trim());
+    const user = telegramId && await store.user(telegramId);
+    if (!user || !role) return sendMessage(config.leaderToken, message.chat.id, 'Usage: <code>/role TELEGRAM_ID | New role</code>');
+    return changeUserRole(message.chat.id, user, role);
+  }
   if (command === '/projects') {
     return showProjects(message.chat.id);
   }
@@ -341,6 +361,8 @@ async function leaderNaturalLanguageReply(message) {
   const session = projectCreation.get(message.chat.id);
   if (session) return leaderCreationReply(message);
   const normalized = message.text.trim().toLowerCase();
+  const roleMatch = message.text.match(/(?:change|update|set|make)\s+(.+?)(?:'s)?\s+role\s+(?:to|as)\s+(.+)/i);
+  if (roleMatch) return changeRoleByName(message.chat.id, roleMatch[1], roleMatch[2].trim());
   if (/\b(start|create|make|begin|new)\b.*\bproject\b/.test(normalized)) return continueProjectCreation(message.chat.id, {});
   if (/\b(show|list|view)\b.*\bprojects?\b/.test(normalized)) return showProjects(message.chat.id);
   if (/\b(update|status|progress|going)\b/.test(normalized)) {

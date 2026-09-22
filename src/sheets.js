@@ -148,6 +148,7 @@ export class SheetStore {
   async tasksForProject(projectId) { return (await this.rows('Tasks')).filter((task) => task.ProjectID === projectId); }
   async approvals(status = 'Pending') { return (await this.rows('Approvals')).filter((item) => item.Status === status); }
   async user(telegramId) { return (await this.rows('Users')).find((user) => String(user.TelegramUserID) === String(telegramId) && user.Active === 'Yes'); }
+  async activeUsers() { return (await this.rows('Users')).filter((user) => user.Active === 'Yes'); }
   async onboarding(onboardingId) { return (await this.rows('MemberOnboarding')).find((item) => item.OnboardingID === onboardingId); }
   async onboardingForMember(projectId, telegramId) {
     return (await this.rows('MemberOnboarding')).find((item) => item.ProjectID === projectId && String(item.TelegramUserID) === String(telegramId) && ['Pending', 'Approved'].includes(item.Status));
