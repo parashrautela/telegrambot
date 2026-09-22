@@ -28,7 +28,47 @@ const founderRequestSchema = {
   required: ['intent', 'project_name', 'client_name', 'start_date', 'project_id', 'reply'],
 };
 
+const groupMessageSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    intent: { type: 'string', enum: ['send_group_message', 'unknown'] },
+    project_id: { type: 'string', description: 'A ProjectID from the supplied projects, or an empty string if unclear.' },
+    message_text: { type: 'string', description: 'The message to post in the project Telegram group, or an empty string.' },
+    clarification_question: { type: 'string', description: 'One short question when the project is unclear, otherwise an empty string.' },
+  },
+  required: ['intent', 'project_id', 'message_text', 'clarification_question'],
+};
+
 export function aiEnabled() { return Boolean(openAiConfig()); }
+
+export async function interpretFounderGroupMessage({ message, projects }) {
+  const config = openAiConfig();
+  if (!config) throw new Error('AI is not configured.');
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: config.model,
+      store: false,
+      instructions: [
+        'Classify a founder request to send a message to a linked project Telegram group.',
+        'Use send_group_message only when the founder actually asks to send, post, ask, tell, or request something from people in a project group.',
+        'Resolve project_id only from the supplied projects. If multiple projects exist and the target is unclear, leave project_id empty and ask which project.',
+        'Draft a concise group message faithful to the request. Do not invent a deadline, channel, file type, client identity, or promises to follow up unless explicitly requested.',
+        'The project group is the delivery channel. Never ask whether to use WhatsApp or email.',
+        'Do not claim the message was sent. Return only the JSON schema output.',
+      ].join(' '),
+      input: JSON.stringify({ projects, founder_message: message }),
+      text: { format: { type: 'json_schema', name: 'founder_group_message', strict: true, schema: groupMessageSchema } },
+    }),
+  });
+  if (!response.ok) throw new Error(`OpenAI request failed: ${await response.text()}`);
+  const payload = await response.json();
+  const outputText = payload.output_text || payload.output?.flatMap((item) => item.content ?? []).find((item) => item.type === 'output_text')?.text;
+  if (!outputText) throw new Error(`OpenAI returned no group-message draft (status: ${payload.status ?? 'unknown'}).`);
+  return JSON.parse(outputText);
+}
 
 export async function interpretProjectUpdate({ project, tasks, message }) {
   const config = openAiConfig();
@@ -110,7 +150,8 @@ export async function chatWithFounder({ message, history, projects }) {
         'You are Iksha, a warm, concise, practical project co-pilot speaking privately with the founder over Telegram.',
         'Talk naturally: greetings, clarification, project discussion, and small talk are welcome. Match the founder’s casual tone without overdoing slang.',
         'Use the supplied project snapshot as the only source of project facts. Never invent project status, people, dates, tasks, approvals, or actions.',
-        'You cannot change Google Sheets, Telegram groups, projects, tasks, plans, roles, or approvals yourself in this chat. If asked to change something, explain the safe next step and say that the bot will ask for confirmation before any change.',
+        'You cannot directly change Google Sheets, projects, tasks, plans, roles, or approvals in this chat. For those requests, explain the available guided flow.',
+        'The bot has a separate founder-approved action to post to linked project Telegram groups. Never say it cannot post or ask about WhatsApp or email. If the founder asks to post, ask them to name the project and message.',
         'If the request is ambiguous, ask one useful follow-up question. Do not dump commands unless they are the clearest fallback.',
         'Keep replies short enough for Telegram: normally one to four sentences. Use plain text only; no markdown tables.',
       ].join(' '),

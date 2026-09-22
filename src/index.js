@@ -1,6 +1,6 @@
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
-import { aiEnabled, chatWithFounder, interpretProjectUpdate } from './ai.js';
+import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
 import { answerCallback, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
@@ -14,6 +14,7 @@ const projectCreation = new Map();
 const aiDrafts = new Map();
 const founderRoleAssignments = new Map();
 const founderConversation = new Map();
+const founderGroupMessageDrafts = new Map();
 const groupBotProfile = await getMe(config.groupToken);
 const leaderBotProfile = await getMe(config.leaderToken);
 const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
@@ -56,6 +57,35 @@ async function founderChatReply(message) {
   rememberFounderConversation(chatId, 'user', text);
   rememberFounderConversation(chatId, 'assistant', reply);
   return sendMessage(config.leaderToken, chatId, escape(reply));
+}
+
+async function draftFounderGroupMessage(message) {
+  const projects = (await store.rows('Projects')).filter((project) => project.GroupChatID && !['Completed', 'Abandoned'].includes(project.Status));
+  const interpreted = await interpretFounderGroupMessage({
+    message: message.text.trim(),
+    projects: projects.map((project) => ({ id: project.ProjectID, name: project.ProjectName, client: project.ClientName })),
+  });
+  if (interpreted.intent !== 'send_group_message') return false;
+  const project = projects.find((item) => item.ProjectID === interpreted.project_id);
+  if (!project) {
+    const choices = projects.map((item) => `• ${escape(item.ProjectName)} (<code>${escape(item.ProjectID)}</code>)`).join('\n');
+    await sendMessage(config.leaderToken, message.chat.id, `${escape(interpreted.clarification_question || 'Which project group should I send this to?')}\n\n${choices || 'No active project groups are linked yet.'}`);
+    return true;
+  }
+  const text = String(interpreted.message_text || '').trim();
+  if (!text || text.length > 3_500) {
+    await sendMessage(config.leaderToken, message.chat.id, 'I could not prepare a short group message. Please tell me what you want the client or team to hear.');
+    return true;
+  }
+  const draftId = crypto.randomUUID();
+  founderGroupMessageDrafts.set(draftId, { projectId: project.ProjectID, text, createdAt: Date.now() });
+  await sendMessage(config.leaderToken, message.chat.id, `<b>Ready to send to ${escape(project.ProjectName)}</b>\n\n${escape(text)}\n\nTap Send to post this in the linked Telegram group.`, {
+    inline_keyboard: [[
+      { text: `Send to ${project.ProjectName}`.slice(0, 55), callback_data: `group_send:${draftId}` },
+      { text: 'Cancel', callback_data: `group_cancel:${draftId}` },
+    ]],
+  });
+  return true;
 }
 
 console.log(`Project group bot connected as @${groupBotProfile.username}.`);
@@ -563,6 +593,14 @@ async function leaderNaturalLanguageReply(message) {
   if (roleMatch) return changeRoleByName(message.chat.id, roleMatch[1], roleMatch[2].trim());
   if (/\b(start|create|make|begin|new)\b.*\bproject\b/.test(normalized)) return continueProjectCreation(message.chat.id, {});
   if (/\b(show|list|view)\b.*\bprojects?\b/.test(normalized)) return showProjects(message.chat.id);
+  if (aiEnabled() && /\b(send|post|ask|message|write|tell|share|request)\b/i.test(message.text)) {
+    try {
+      if (await draftFounderGroupMessage(message)) return;
+    } catch (error) {
+      console.error('Founder group message draft error:', error.message);
+      return sendMessage(config.leaderToken, message.chat.id, 'I could not prepare that group message just now. Please try again.');
+    }
+  }
   if (/\b(update|status|progress|going)\b/.test(normalized)) {
     const projects = await store.rows('Projects');
     const match = projects.find((project) => normalized.includes(project.ProjectName.toLowerCase()));
@@ -577,7 +615,7 @@ async function leaderNaturalLanguageReply(message) {
   }
   if (!aiEnabled()) return sendMessage(config.leaderToken, message.chat.id, 'I can help with projects, but AI is not configured yet. You can still use /help.');
   try {
-    return founderChatReply(message);
+    return await founderChatReply(message);
   } catch (error) {
     console.error('Founder chat error:', error.message);
     return sendMessage(config.leaderToken, message.chat.id, 'I hit a small snag replying just now. Try once more, or use /help for the project controls.');
@@ -585,6 +623,42 @@ async function leaderNaturalLanguageReply(message) {
 }
 
 async function leaderCallback(callback) {
+  if (callback.data.startsWith('group_send:') || callback.data.startsWith('group_cancel:')) {
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can send project messages.');
+    const [action, draftId] = callback.data.split(':');
+    const draft = founderGroupMessageDrafts.get(draftId);
+    if (!draft || Date.now() - draft.createdAt > 15 * 60 * 1000) {
+      founderGroupMessageDrafts.delete(draftId);
+      return answerCallback(config.leaderToken, callback.id, 'This draft expired. Please ask me to prepare the message again.');
+    }
+    if (action === 'group_cancel') {
+      founderGroupMessageDrafts.delete(draftId);
+      return answerCallback(config.leaderToken, callback.id, 'Cancelled. No group message was sent.');
+    }
+    if (draft.sending) return answerCallback(config.leaderToken, callback.id, 'This message is already being sent.');
+    const project = await store.projectById(draft.projectId);
+    if (!project || !project.GroupChatID || ['Completed', 'Abandoned'].includes(project.Status)) {
+      founderGroupMessageDrafts.delete(draftId);
+      return answerCallback(config.leaderToken, callback.id, 'This project group is no longer active.');
+    }
+    draft.sending = true;
+    try {
+      await sendMessage(config.groupToken, project.GroupChatID, escape(draft.text));
+    } catch (error) {
+      draft.sending = false;
+      console.error('Founder group message error:', error.message);
+      await answerCallback(config.leaderToken, callback.id, 'Could not send to the project group.');
+      return sendMessage(config.leaderToken, callback.message.chat.id, `I could not post to <b>${escape(project.ProjectName)}</b>. Please check that the project group bot is still in that group, then tap Send again.`);
+    }
+    founderGroupMessageDrafts.delete(draftId);
+    await answerCallback(config.leaderToken, callback.id, 'Sent to the project group.');
+    try {
+      await store.audit({ projectId: project.ProjectID, action: 'Founder group message sent', actor: callback.from.id, actorName: actor(callback.from).name, source: 'Telegram founder bot', details: draft.text });
+    } catch (error) {
+      console.error('Founder group message audit error:', error.message);
+    }
+    return sendMessage(config.leaderToken, callback.message.chat.id, `✅ Sent to <b>${escape(project.ProjectName)}</b>.`);
+  }
   if (callback.data.startsWith('close_project:')) {
     if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can close a project.');
     const [, projectId, decision] = callback.data.split(':');

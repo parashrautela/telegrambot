@@ -10,6 +10,7 @@ Studio Iksha is a two-bot Telegram workspace for construction and interior proje
 - Plan-linked resource delivery for documents, photo URLs or Telegram file IDs stored in Google Sheets.
 - Google Sheets tracking for projects, tasks, dates, delays, issues, approvals, users, onboarding, and audit logs.
 - A conversational founder assistant for normal chat, project questions, clarifications, and small talk, alongside plain-English project requests.
+- Founder-to-group messages: ask in plain English, review the proposed text, then tap **Send to [project]** to post through the group bot in that project's linked Telegram group.
 - Group updates through commands or a plain-English mention of the group bot.
 - AI drafts require confirmation before changing a task; delay requests also need founder approval.
 - New-member onboarding: project TLDR in the group, private founder role approval, and a pending state until approved.
@@ -115,6 +116,8 @@ If the founder leaves a linked project group, the founder bot sends three choice
 Use normal English for common actions, or these commands as a fallback:
 
 The founder bot keeps a short, in-memory window of the recent private chat so follow-up questions feel natural. It receives a compact live project snapshot with each AI reply; this memory clears whenever the Railway service restarts. The API request uses `store: false`. The assistant can discuss work freely, but it cannot make a project, task, role, approval, or Sheets change without the bot’s existing guided flow or confirmation.
+
+To message a project group, say something like “Ask the Nishank Residence client to share the site photos and existing plans.” The founder bot shows the destination and exact draft with **Send** and **Cancel** buttons. Only the configured founder can confirm; the group bot posts to the project's registered group, and the action is recorded in the audit log. Drafts expire after 15 minutes or a service restart.
 
 | Command | Purpose |
 | --- | --- |
