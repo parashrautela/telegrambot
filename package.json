@@ -9,6 +9,6 @@
     "create-demo-project": "node --env-file=.env src/create-demo-project.js",
     "start": "node src/index.js",
     "start:local": "node --env-file=.env src/index.js",
-    "check": "node --check src/index.js && node --check src/ai.js && node --check src/sheets.js && node --check src/telegram.js"
+    "check": "node --check src/index.js && node --check src/ai.js && node --check src/schema.js && node --check src/sheets.js && node --check src/telegram.js && node --check src/project-service.js && node --check src/seed-workflow.js"
   }
 }

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { googleConfig } from './config.js';
-import { SHEETS } from './schema.js';
+import { SHEETS, WORKFLOWS } from './schema.js';
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
@@ -74,6 +74,17 @@ export class SheetStore {
       await this.request(`/values/${encodeURIComponent(`${name}!A1`)}?valueInputOption=RAW`, {
         method: 'PUT', body: JSON.stringify({ values: [headers] }),
       });
+    }
+  }
+
+  async seedDefaultWorkflows() {
+    const existing = await this.rows('WorkflowTemplates');
+    const known = new Set(existing.map((row) => row.WorkflowID));
+    for (const [workflowId, steps] of Object.entries(WORKFLOWS)) {
+      if (known.has(workflowId)) continue;
+      for (const [WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone] of steps) {
+        await this.append('WorkflowTemplates', { WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone });
+      }
     }
   }
 
@@ -161,6 +172,12 @@ export class SheetStore {
     if (existing) await this.updateRow('Users', existing.rowNumber, { Name: name, Role: role, Active: 'Yes' });
     else await this.append('Users', { TelegramUserID: onboarding.TelegramUserID, Name: name, Role: role, Active: 'Yes' });
     await this.updateRow('MemberOnboarding', onboarding.rowNumber, { Status: 'Approved', AssignedName: name, AssignedRole: role, ApprovedAt: now(), ApprovedByTelegramID: String(founderTelegramId) });
+  }
+
+  async resourcesForWorkflow(workflowId) {
+    return (await this.rows('ProjectResources'))
+      .filter((resource) => resource.WorkflowID === workflowId && resource.Active === 'Yes')
+      .sort((left, right) => Number(left.SortOrder || 0) - Number(right.SortOrder || 0));
   }
 
   async requestDelay({ project, task, actor, days, reason }) {

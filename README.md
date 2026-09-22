@@ -4,7 +4,9 @@ Studio Iksha is a two-bot Telegram workspace for construction and interior proje
 
 ## Features
 
-- Project creation from the built-in 15-step house workflow.
+- Client-led plan assignment: after the founder approves a joining member as the client, the founder chooses a workflow before tasks are generated.
+- Four built-in workflow choices: new home/construction, restoration, painting and finishes, and interior renovation.
+- Plan-linked resource delivery for documents, photo URLs or Telegram file IDs stored in Google Sheets.
 - Google Sheets tracking for projects, tasks, dates, delays, issues, approvals, users, onboarding, and audit logs.
 - A conversational founder assistant for normal chat, project questions, clarifications, and small talk, alongside plain-English project requests.
 - Group updates through commands or a plain-English mention of the group bot.
@@ -41,7 +43,8 @@ Project team ── project group ── Group bot ┘
    ```
 
 4. Answer any missing questions and select the registered group.
-5. The project and its default tasks are created in Google Sheets.
+5. Add the client to the Telegram group. When the founder approves their role as `Client`, the founder bot asks which plan to assign.
+6. Choose a plan. Only then are its tasks generated and its linked resources shared in the group.
 
 ### Report an update
 
@@ -62,6 +65,33 @@ Rahul Sharma | Electrical contractor
 ```
 
 The member is then saved in Google Sheets and activated. New members remain pending until the founder assigns their profile.
+
+### Assign a plan after the client joins
+
+For a newly created project, task generation waits until a joining member is approved with a role containing `Client`. The founder bot then presents four plan buttons:
+
+- New home / construction
+- Restoration
+- Painting & finishes
+- Interior renovation
+
+Selecting a plan generates only that plan’s tasks, calculates the target date, and posts a compact plan overview in the project group. Later client-side members can be approved normally; they do not replace an already assigned plan.
+
+### Share plan resources
+
+The bot reads active rows from the `ProjectResources` tab after a plan is selected. Add one row per item:
+
+| Column | What to enter |
+| --- | --- |
+| `WorkflowID` | The plan ID, such as `INTERIOR-V1` or `PAINTING-V1`. |
+| `ResourceType` | `Photo`, `Document`, or `Link`. |
+| `Title` | Short label shown to the project group. |
+| `UrlOrFileId` | A public HTTPS file/photo URL or a Telegram file ID. |
+| `Description` | Optional context for the resource. |
+| `SortOrder` | Delivery order, for example `10`, `20`, `30`. |
+| `Active` | Set to `Yes` to share it. |
+
+The bot does not invent photos or documents. If a plan has no active resource rows, it says so in the group and the project can continue normally.
 
 > Make the group bot an administrator in every project group. Telegram only delivers member-join events to administrator bots.
 
@@ -102,6 +132,7 @@ The founder bot keeps a short, in-memory window of the recent private chat so fo
 | `Tasks` | Generated task plan and status. |
 | `Users` | Active Telegram users and roles. |
 | `MemberOnboarding` | Join events and founder approvals. |
+| `ProjectResources` | Plan-linked documents, photos, and reference links that the bot shares with the group. |
 | `GroupRegistry` | Groups available for project linking. |
 | `Approvals` | Delay approvals. |
 | `AuditLog` | Operational history. |
@@ -171,7 +202,7 @@ Railway does not read the local `.env` file.
 
 ## Current boundaries
 
-This production pilot does not yet automatically reschedule downstream tasks, create Calendar events, create rework tasks, assign tasks from roles automatically, or offer multiple workflow templates. Planned next work includes a template library, role-to-task assignment, dependency-aware rescheduling, calendar sync, and richer group-agent conversations.
+This production pilot does not yet automatically reschedule downstream tasks, create Calendar events, create rework tasks, or assign tasks from roles automatically. Planned next work includes dependency-aware rescheduling, calendar sync, and richer group-agent conversations.
 
 ## Scripts
 

@@ -19,6 +19,10 @@ export const SHEETS = {
     'OnboardingID', 'ProjectID', 'GroupChatID', 'TelegramUserID', 'TelegramName',
     'JoinedAt', 'Status', 'AssignedName', 'AssignedRole', 'ApprovedAt', 'ApprovedByTelegramID',
   ],
+  ProjectResources: [
+    'ResourceID', 'WorkflowID', 'ResourceType', 'Title', 'UrlOrFileId',
+    'Description', 'SortOrder', 'Active',
+  ],
   GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status'],
   Approvals: [
     'ApprovalID', 'ProjectID', 'TaskID', 'RequestType', 'RequestedByTelegramID',
@@ -47,4 +51,57 @@ export const HOUSE_WORKFLOW = [
   ['HOUSE-V1', 130, 'Finishes', 'Joinery, fixtures and final installations', 12, 'Designer', '120', 'Yes', 'No'],
   ['HOUSE-V1', 140, 'Handover', 'Final inspection and snag resolution', 5, 'Architect', '130', 'Yes', 'No'],
   ['HOUSE-V1', 150, 'Handover', 'Client handover', 2, 'Client', '140', 'Yes', 'Yes'],
+];
+
+export const RESTORATION_WORKFLOW = [
+  ['RESTORATION-V1', 10, 'Assessment', 'Existing-condition survey and measurements', 2, 'Architect', '', 'Yes', 'No'],
+  ['RESTORATION-V1', 20, 'Planning', 'Damage assessment, scope and budget approval', 3, 'Client', '10', 'Yes', 'Yes'],
+  ['RESTORATION-V1', 30, 'Design', 'Restoration method and material selection', 4, 'Architect', '20', 'Yes', 'No'],
+  ['RESTORATION-V1', 40, 'Protection', 'Protect retained finishes and salvage materials', 2, 'Site Supervisor', '30', 'Yes', 'No'],
+  ['RESTORATION-V1', 50, 'Repair', 'Structural and surface repairs', 10, 'Site Supervisor', '40', 'Yes', 'No'],
+  ['RESTORATION-V1', 60, 'Repair', 'Services repair and waterproofing', 7, 'Site Supervisor', '50', 'Yes', 'No'],
+  ['RESTORATION-V1', 70, 'Finishes', 'Restore finishes, fixtures and details', 8, 'Site Supervisor', '60', 'Yes', 'No'],
+  ['RESTORATION-V1', 80, 'Approval', 'Client restoration review', 2, 'Client', '70', 'Yes', 'Yes'],
+  ['RESTORATION-V1', 90, 'Handover', 'Snag resolution and cleaning', 3, 'Site Supervisor', '80', 'Yes', 'No'],
+  ['RESTORATION-V1', 100, 'Handover', 'Final handover', 1, 'Client', '90', 'Yes', 'Yes'],
+];
+
+export const PAINTING_WORKFLOW = [
+  ['PAINTING-V1', 10, 'Assessment', 'Site inspection, measurements and colour brief', 1, 'Designer', '', 'Yes', 'No'],
+  ['PAINTING-V1', 20, 'Planning', 'Colour palette, finish and estimate approval', 2, 'Client', '10', 'Yes', 'Yes'],
+  ['PAINTING-V1', 30, 'Preparation', 'Surface protection, repair and putty work', 3, 'Painting Contractor', '20', 'Yes', 'No'],
+  ['PAINTING-V1', 40, 'Preparation', 'Primer application and sanding', 2, 'Painting Contractor', '30', 'Yes', 'No'],
+  ['PAINTING-V1', 50, 'Execution', 'First paint coat', 2, 'Painting Contractor', '40', 'Yes', 'No'],
+  ['PAINTING-V1', 60, 'Execution', 'Second coat and finish details', 2, 'Painting Contractor', '50', 'Yes', 'No'],
+  ['PAINTING-V1', 70, 'Quality check', 'Touch-ups and quality inspection', 2, 'Site Supervisor', '60', 'Yes', 'No'],
+  ['PAINTING-V1', 80, 'Approval', 'Client colour and finish approval', 1, 'Client', '70', 'Yes', 'Yes'],
+  ['PAINTING-V1', 90, 'Handover', 'Final cleaning and handover', 1, 'Painting Contractor', '80', 'Yes', 'Yes'],
+];
+
+export const INTERIOR_WORKFLOW = [
+  ['INTERIOR-V1', 10, 'Discovery', 'Site measurement and client lifestyle brief', 2, 'Designer', '', 'Yes', 'No'],
+  ['INTERIOR-V1', 20, 'Planning', 'Scope, budget and timeline approval', 3, 'Client', '10', 'Yes', 'Yes'],
+  ['INTERIOR-V1', 30, 'Design', 'Concept, layout and mood board', 5, 'Designer', '20', 'Yes', 'No'],
+  ['INTERIOR-V1', 40, 'Design', 'Detailed drawings and material schedule', 6, 'Designer', '30', 'Yes', 'No'],
+  ['INTERIOR-V1', 50, 'Approval', 'Client design approval', 2, 'Client', '40', 'Yes', 'Yes'],
+  ['INTERIOR-V1', 60, 'Procurement', 'Vendor finalisation and procurement', 5, 'Designer', '50', 'Yes', 'No'],
+  ['INTERIOR-V1', 70, 'Execution', 'Civil, electrical and plumbing preparation', 8, 'Site Supervisor', '60', 'Yes', 'No'],
+  ['INTERIOR-V1', 80, 'Execution', 'Carpentry and false ceiling', 12, 'Site Supervisor', '70', 'Yes', 'No'],
+  ['INTERIOR-V1', 90, 'Execution', 'Finishes, furniture and installation', 10, 'Site Supervisor', '80', 'Yes', 'No'],
+  ['INTERIOR-V1', 100, 'Handover', 'Styling, snag resolution and inspection', 3, 'Designer', '90', 'Yes', 'No'],
+  ['INTERIOR-V1', 110, 'Handover', 'Client handover', 1, 'Client', '100', 'Yes', 'Yes'],
+];
+
+export const WORKFLOWS = {
+  'HOUSE-V1': HOUSE_WORKFLOW,
+  'RESTORATION-V1': RESTORATION_WORKFLOW,
+  'PAINTING-V1': PAINTING_WORKFLOW,
+  'INTERIOR-V1': INTERIOR_WORKFLOW,
+};
+
+export const WORKFLOW_OPTIONS = [
+  { id: 'HOUSE-V1', label: 'New home / construction', description: 'Full house-building workflow' },
+  { id: 'RESTORATION-V1', label: 'Restoration', description: 'Repair and restore an existing property' },
+  { id: 'PAINTING-V1', label: 'Painting & finishes', description: 'Painting-led refresh workflow' },
+  { id: 'INTERIOR-V1', label: 'Interior renovation', description: 'Interior design and execution workflow' },
 ];

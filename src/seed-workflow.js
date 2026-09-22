@@ -1,13 +1,14 @@
 import { SheetStore } from './sheets.js';
-import { HOUSE_WORKFLOW } from './schema.js';
+import { WORKFLOWS } from './schema.js';
 
 const store = new SheetStore();
-const existing = await store.rows('WorkflowTemplates');
-if (existing.some((row) => row.WorkflowID === 'HOUSE-V1')) {
-  console.log('HOUSE-V1 already exists; no rows added.');
-} else {
-  for (const [WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone] of HOUSE_WORKFLOW) {
+const existing = new Set((await store.rows('WorkflowTemplates')).map((row) => row.WorkflowID));
+let added = 0;
+for (const [workflowId, steps] of Object.entries(WORKFLOWS)) {
+  if (existing.has(workflowId)) continue;
+  for (const [WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone] of steps) {
     await store.append('WorkflowTemplates', { WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone });
   }
-  console.log(`Added ${HOUSE_WORKFLOW.length} house-building workflow steps.`);
+  added += steps.length;
 }
+console.log(added ? `Added ${added} workflow steps.` : 'All default workflows already exist; no rows added.');

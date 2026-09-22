@@ -2,7 +2,8 @@ import { botConfig } from './config.js';
 import crypto from 'node:crypto';
 import { aiEnabled, chatWithFounder, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
-import { answerCallback, getMe, poll, sendMessage } from './telegram.js';
+import { WORKFLOW_OPTIONS } from './schema.js';
+import { answerCallback, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
 
 const config = botConfig();
 const store = new SheetStore();
@@ -60,6 +61,7 @@ async function founderChatReply(message) {
 console.log(`Project group bot connected as @${groupBotProfile.username}.`);
 console.log(`Founder bot connected as @${leaderBotProfile.username}; founder Telegram ID is ${config.founderTelegramId}.`);
 await store.ensureSchema();
+await store.seedDefaultWorkflows();
 
 const parseDate = (input) => {
   const trimmed = input.trim();
@@ -91,6 +93,39 @@ async function projectTldr(project) {
     `Stuck on: ${blockers.length ? escape(blockers.join(' · ')) : 'No recorded blockers'}`,
     `Next milestone: ${escape(current?.TaskName || 'Project handover')}`,
   ].join('\n');
+}
+
+function planOverview(workflow) {
+  const stages = [];
+  for (const task of workflow) {
+    const existing = stages.find((stage) => stage.name === task.Stage);
+    if (existing) existing.count += 1;
+    else stages.push({ name: task.Stage, count: 1 });
+  }
+  return stages.map((stage) => `• ${escape(stage.name)} — ${stage.count} task${stage.count === 1 ? '' : 's'}`).join('\n');
+}
+
+async function shareWorkflowResources(project, workflowId) {
+  const resources = await store.resourcesForWorkflow(workflowId);
+  if (!resources.length) {
+    return sendMessage(config.groupToken, project.GroupChatID, 'The workflow is assigned. No project resource pack has been linked yet; the founder can add plan links, photos, PDFs, or reference files to the <code>ProjectResources</code> sheet.');
+  }
+  for (const resource of resources) {
+    const caption = `<b>${escape(resource.Title)}</b>${resource.Description ? `\n${escape(resource.Description)}` : ''}`;
+    try {
+      if (resource.ResourceType.toLowerCase() === 'photo') await sendPhoto(config.groupToken, project.GroupChatID, resource.UrlOrFileId, caption);
+      else if (resource.ResourceType.toLowerCase() === 'document') await sendDocument(config.groupToken, project.GroupChatID, resource.UrlOrFileId, caption);
+      else await sendMessage(config.groupToken, project.GroupChatID, `${caption}\n${escape(resource.UrlOrFileId)}`);
+    } catch (error) {
+      console.error(`Could not share resource ${resource.ResourceID}:`, error.message);
+    }
+  }
+}
+
+async function askFounderForPlan({ project, clientName }) {
+  return sendMessage(config.leaderToken, config.founderTelegramId, `<b>Client profile complete</b>\n\n${escape(clientName)} is now marked as the client for <b>${escape(project.ProjectName)}</b>. Which plan should we assign?\n\nThe selected plan will generate the project tasks and share its linked resources with the group.`, {
+    inline_keyboard: WORKFLOW_OPTIONS.map((option) => [{ text: option.label, callback_data: `choose_plan:${project.ProjectID}:${option.id}` }]),
+  });
 }
 
 const joinedStatus = new Set(['member', 'administrator', 'restricted']);
@@ -397,6 +432,11 @@ async function leaderNaturalLanguageReply(message) {
     founderRoleAssignments.delete(message.chat.id);
     await sendMessage(config.groupToken, onboarding.GroupChatID, `✅ <b>${escape(name)}</b> is now active on this project as <b>${escape(role)}</b>.`);
     try { await sendMessage(config.leaderToken, onboarding.TelegramUserID, `Your project profile is active. Role: <b>${escape(role)}</b>.`); } catch { console.log('New member has not started the founder bot yet.'); }
+    const project = await store.projectById(onboarding.ProjectID);
+    if (project && /\bclient\b/i.test(role) && !(await store.tasksForProject(project.ProjectID)).length) {
+      await askFounderForPlan({ project, clientName: name });
+      return sendMessage(config.leaderToken, message.chat.id, `✅ ${escape(name)} is now active as ${escape(role)}. I’ve also asked which workflow to assign.`);
+    }
     return sendMessage(config.leaderToken, message.chat.id, `✅ ${escape(name)} is now active as ${escape(role)}.`);
   }
   const session = projectCreation.get(message.chat.id);
@@ -428,6 +468,26 @@ async function leaderNaturalLanguageReply(message) {
 }
 
 async function leaderCallback(callback) {
+  if (callback.data.startsWith('choose_plan:')) {
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can assign a project plan.');
+    const [, projectId, workflowId] = callback.data.split(':');
+    const option = WORKFLOW_OPTIONS.find((item) => item.id === workflowId);
+    const project = await store.projectById(projectId);
+    if (!option || !project) return answerCallback(config.leaderToken, callback.id, 'That project plan is no longer available.');
+    if ((await store.tasksForProject(projectId)).length) return answerCallback(config.leaderToken, callback.id, 'This project already has a plan assigned.');
+    try {
+      const { assignWorkflowToProject } = await import('./project-service.js');
+      const result = await assignWorkflowToProject({ store, project, workflowId, actorTelegramId: config.founderTelegramId });
+      await answerCallback(config.leaderToken, callback.id, 'Project plan assigned.');
+      await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(option.label)}</b> assigned to <b>${escape(project.ProjectName)}</b>.\n${result.taskCount} tasks generated. Planned finish: ${escape(result.targetEndDate)}.`);
+      await sendMessage(config.groupToken, project.GroupChatID, `<b>Project plan assigned — ${escape(option.label)}</b>\n\n${planOverview(result.workflow)}\n\n${result.taskCount} tasks are now active. Use /tasks to see the full plan.`);
+      await shareWorkflowResources(project, workflowId);
+      return;
+    } catch (error) {
+      console.error('Workflow assignment error:', error.message);
+      return answerCallback(config.leaderToken, callback.id, 'Could not assign this plan. Check the Railway logs.');
+    }
+  }
   if (callback.data.startsWith('onboard_role:')) {
     if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can assign project roles.');
     const onboarding = await store.onboarding(callback.data.slice('onboard_role:'.length));
@@ -443,15 +503,15 @@ async function leaderCallback(callback) {
     const groupChatId = callback.data.slice('create_group:'.length);
     try {
       const projectId = await nextProjectId();
-      const { createProjectFromHouseWorkflow } = await import('./project-service.js');
-      const result = await createProjectFromHouseWorkflow({
+      const { createProjectShell } = await import('./project-service.js');
+      await createProjectShell({
         store, projectId, projectName: session.projectName, clientName: session.clientName,
         startDateText: session.startDateText, groupChatId, leaderTelegramId: config.founderTelegramId,
       });
       projectCreation.delete(callback.message.chat.id);
       await answerCallback(config.leaderToken, callback.id, 'Project created.');
-      await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(session.projectName)}</b> created as <code>${projectId}</code>.\n${result.taskCount} tasks generated.\nPlanned finish: ${result.targetEndDate}`);
-      return sendMessage(config.groupToken, groupChatId, `🏠 <b>${escape(session.projectName)}</b> is now connected.\n${result.taskCount} tasks have been generated. Use /tasks to view the plan.`);
+      await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(session.projectName)}</b> created as <code>${projectId}</code>.\n\nIt is waiting for the client to join the group. Once you approve their role as <b>Client</b>, I’ll ask you which plan to assign.`);
+      return sendMessage(config.groupToken, groupChatId, `🏠 <b>${escape(session.projectName)}</b> is now connected.\n\nAdd the client to this group. Once the founder confirms them as <b>Client</b>, the founder bot will select the project plan and share its linked resources here.`);
     } catch (error) {
       console.error('Project creation error:', error.message);
       return answerCallback(config.leaderToken, callback.id, 'Could not create project. Check the logs.');
