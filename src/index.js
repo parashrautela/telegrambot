@@ -1,6 +1,6 @@
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
-import { aiEnabled, interpretFounderRequest, interpretProjectUpdate } from './ai.js';
+import { aiEnabled, chatWithFounder, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { answerCallback, getMe, poll, sendMessage } from './telegram.js';
 
@@ -12,9 +12,50 @@ const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&':
 const projectCreation = new Map();
 const aiDrafts = new Map();
 const founderRoleAssignments = new Map();
+const founderConversation = new Map();
 const groupBotProfile = await getMe(config.groupToken);
 const leaderBotProfile = await getMe(config.leaderToken);
 const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
+
+function founderHistory(chatId) {
+  return founderConversation.get(String(chatId)) ?? [];
+}
+
+function rememberFounderConversation(chatId, role, content) {
+  const entries = [...founderHistory(chatId), { role, content: String(content).slice(0, 1_200) }].slice(-8);
+  founderConversation.set(String(chatId), entries);
+}
+
+async function founderProjectContext() {
+  const projects = await store.rows('Projects');
+  return Promise.all(projects.slice(-12).map(async (project) => {
+    const tasks = await store.tasksForProject(project.ProjectID);
+    const current = tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
+    return {
+      id: project.ProjectID,
+      name: project.ProjectName,
+      client: project.ClientName,
+      status: project.Status,
+      progress: `${tasks.filter((task) => task.Status === 'Completed').length}/${tasks.length}`,
+      current_task: current?.TaskName || 'All planned tasks complete',
+      current_stage: current?.Stage || 'Handover',
+      target_end: project.TargetEndDate || '',
+    };
+  }));
+}
+
+async function founderChatReply(message) {
+  const chatId = message.chat.id;
+  const text = message.text.trim();
+  const reply = await chatWithFounder({
+    message: text,
+    history: founderHistory(chatId),
+    projects: await founderProjectContext(),
+  });
+  rememberFounderConversation(chatId, 'user', text);
+  rememberFounderConversation(chatId, 'assistant', reply);
+  return sendMessage(config.leaderToken, chatId, escape(reply));
+}
 
 console.log(`Project group bot connected as @${groupBotProfile.username}.`);
 console.log(`Founder bot connected as @${leaderBotProfile.username}; founder Telegram ID is ${config.founderTelegramId}.`);
@@ -379,20 +420,10 @@ async function leaderNaturalLanguageReply(message) {
   }
   if (!aiEnabled()) return sendMessage(config.leaderToken, message.chat.id, 'I can help with projects, but AI is not configured yet. You can still use /help.');
   try {
-    const result = await interpretFounderRequest(message.text.trim());
-    if (result.intent === 'start_project') {
-      return continueProjectCreation(message.chat.id, {
-        projectName: result.project_name || '', clientName: result.client_name || '', startDateText: parseDate(result.start_date) || '',
-      });
-    }
-    if (result.intent === 'list_projects') return showProjects(message.chat.id);
-    if (result.intent === 'project_status' && result.project_id) {
-      return leaderCommand({ ...message, text: `/project ${result.project_id}` });
-    }
-    return sendMessage(config.leaderToken, message.chat.id, result.reply || 'I can start a project, list projects, or check a project status. What would you like to do?');
+    return founderChatReply(message);
   } catch (error) {
-    console.error('Founder AI interpretation error:', error.message);
-    return sendMessage(config.leaderToken, message.chat.id, 'I could not understand that just now. Please try again, or use /help.');
+    console.error('Founder chat error:', error.message);
+    return sendMessage(config.leaderToken, message.chat.id, 'I hit a small snag replying just now. Try once more, or use /help for the project controls.');
   }
 }
 

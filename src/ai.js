@@ -93,3 +93,37 @@ export async function interpretFounderRequest(message) {
   if (!outputText) throw new Error(`OpenAI returned no structured output (status: ${payload.status ?? 'unknown'}).`);
   return JSON.parse(outputText);
 }
+
+// We deliberately manage a small conversation window in the application instead
+// of creating a persistent OpenAI Conversation. That keeps the bot personable
+// while making its memory bounded and ephemeral.
+export async function chatWithFounder({ message, history, projects }) {
+  const config = openAiConfig();
+  if (!config) throw new Error('AI is not configured.');
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: config.model,
+      store: false,
+      instructions: [
+        'You are Iksha, a warm, concise, practical project co-pilot speaking privately with the founder over Telegram.',
+        'Talk naturally: greetings, clarification, project discussion, and small talk are welcome. Match the founder’s casual tone without overdoing slang.',
+        'Use the supplied project snapshot as the only source of project facts. Never invent project status, people, dates, tasks, approvals, or actions.',
+        'You cannot change Google Sheets, Telegram groups, projects, tasks, plans, roles, or approvals yourself in this chat. If asked to change something, explain the safe next step and say that the bot will ask for confirmation before any change.',
+        'If the request is ambiguous, ask one useful follow-up question. Do not dump commands unless they are the clearest fallback.',
+        'Keep replies short enough for Telegram: normally one to four sentences. Use plain text only; no markdown tables.',
+      ].join(' '),
+      input: JSON.stringify({
+        recent_conversation: history,
+        current_projects: projects,
+        founder_message: message,
+      }),
+    }),
+  });
+  if (!response.ok) throw new Error(`OpenAI request failed: ${await response.text()}`);
+  const payload = await response.json();
+  const outputText = payload.output_text || payload.output?.flatMap((item) => item.content ?? []).find((item) => item.type === 'output_text')?.text;
+  if (!outputText) throw new Error(`OpenAI returned no chat response (status: ${payload.status ?? 'unknown'}).`);
+  return outputText.trim();
+}

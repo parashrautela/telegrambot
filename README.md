@@ -6,7 +6,7 @@ Studio Iksha is a two-bot Telegram workspace for construction and interior proje
 
 - Project creation from the built-in 15-step house workflow.
 - Google Sheets tracking for projects, tasks, dates, delays, issues, approvals, users, onboarding, and audit logs.
-- Plain-English founder requests, including “start a project,” “show my projects,” and project-status questions.
+- A conversational founder assistant for normal chat, project questions, clarifications, and small talk, alongside plain-English project requests.
 - Group updates through commands or a plain-English mention of the group bot.
 - AI drafts require confirmation before changing a task; delay requests also need founder approval.
 - New-member onboarding: project TLDR in the group, private founder role approval, and a pending state until approved.
@@ -25,7 +25,7 @@ Project team ── project group ── Group bot ┘
 | Founder bot | Project setup, project status, approvals, and member-role approval. |
 | Group bot | Group onboarding, task updates, delays, and issues. |
 | Google Sheets | Persistent project data and audit trail. |
-| OpenAI API | Turns supported plain-English messages into safe structured drafts. |
+| OpenAI API | Powers founder conversation and turns supported group updates into safe structured drafts. |
 | Railway | Production hosting. |
 
 ## Everyday flows
@@ -68,6 +68,8 @@ The member is then saved in Google Sheets and activated. New members remain pend
 ## Founder bot
 
 Use normal English for common actions, or these commands as a fallback:
+
+The founder bot keeps a short, in-memory window of the recent private chat so follow-up questions feel natural. It receives a compact live project snapshot with each AI reply; this memory clears whenever the Railway service restarts. The API request uses `store: false`. The assistant can discuss work freely, but it cannot make a project, task, role, approval, or Sheets change without the bot’s existing guided flow or confirmation.
 
 | Command | Purpose |
 | --- | --- |
@@ -154,7 +156,7 @@ Railway does not read the local `.env` file.
 - If a Telegram token leaks, use `@BotFather` → `/revoke`, replace it in Railway, and redeploy.
 - If a Google private key leaks, delete and replace the service-account key in Google Cloud.
 - Founder actions are restricted by `FOUNDER_TELEGRAM_ID`.
-- AI drafts are not executed until a person confirms them.
+- AI drafts are not executed until a person confirms them. Founder chat memory is short-lived in the running service and OpenAI requests use `store: false`.
 - Operational changes are recorded in `AuditLog`.
 
 ## Troubleshooting
