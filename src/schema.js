@@ -23,6 +23,10 @@ export const SHEETS = {
     'ResourceID', 'WorkflowID', 'ResourceType', 'Title', 'UrlOrFileId',
     'Description', 'SortOrder', 'Active',
   ],
+  SubmittedResources: [
+    'SubmissionID', 'ProjectID', 'TaskID', 'GroupChatID', 'TelegramUserID',
+    'SubmittedByName', 'ResourceType', 'TelegramFileID', 'FileName', 'Caption', 'SubmittedAt',
+  ],
   GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status'],
   Approvals: [
     'ApprovalID', 'ProjectID', 'TaskID', 'RequestType', 'RequestedByTelegramID',
@@ -36,7 +40,8 @@ export const SHEETS = {
 };
 
 export const HOUSE_WORKFLOW = [
-  ['HOUSE-V1', 10, 'Discovery', 'Site assessment and measurement', 2, 'Architect', '', 'Yes', 'No'],
+  ['HOUSE-V1', 5, 'Resources', 'Collect project plans, photos and client documents', 1, 'Client', '', 'Yes', 'No'],
+  ['HOUSE-V1', 10, 'Discovery', 'Site assessment and measurement', 2, 'Architect', '5', 'Yes', 'No'],
   ['HOUSE-V1', 20, 'Planning', 'Client brief, budget and scope approval', 3, 'Client', '10', 'Yes', 'Yes'],
   ['HOUSE-V1', 30, 'Design', 'Concept design and layout', 5, 'Designer', '20', 'Yes', 'No'],
   ['HOUSE-V1', 40, 'Design', 'Architectural drawings', 7, 'Architect', '30', 'Yes', 'No'],
@@ -54,7 +59,8 @@ export const HOUSE_WORKFLOW = [
 ];
 
 export const RESTORATION_WORKFLOW = [
-  ['RESTORATION-V1', 10, 'Assessment', 'Existing-condition survey and measurements', 2, 'Architect', '', 'Yes', 'No'],
+  ['RESTORATION-V1', 5, 'Resources', 'Collect project plans, photos and client documents', 1, 'Client', '', 'Yes', 'No'],
+  ['RESTORATION-V1', 10, 'Assessment', 'Existing-condition survey and measurements', 2, 'Architect', '5', 'Yes', 'No'],
   ['RESTORATION-V1', 20, 'Planning', 'Damage assessment, scope and budget approval', 3, 'Client', '10', 'Yes', 'Yes'],
   ['RESTORATION-V1', 30, 'Design', 'Restoration method and material selection', 4, 'Architect', '20', 'Yes', 'No'],
   ['RESTORATION-V1', 40, 'Protection', 'Protect retained finishes and salvage materials', 2, 'Site Supervisor', '30', 'Yes', 'No'],
@@ -67,7 +73,8 @@ export const RESTORATION_WORKFLOW = [
 ];
 
 export const PAINTING_WORKFLOW = [
-  ['PAINTING-V1', 10, 'Assessment', 'Site inspection, measurements and colour brief', 1, 'Designer', '', 'Yes', 'No'],
+  ['PAINTING-V1', 5, 'Resources', 'Collect project plans, photos and client documents', 1, 'Client', '', 'Yes', 'No'],
+  ['PAINTING-V1', 10, 'Assessment', 'Site inspection, measurements and colour brief', 1, 'Designer', '5', 'Yes', 'No'],
   ['PAINTING-V1', 20, 'Planning', 'Colour palette, finish and estimate approval', 2, 'Client', '10', 'Yes', 'Yes'],
   ['PAINTING-V1', 30, 'Preparation', 'Surface protection, repair and putty work', 3, 'Painting Contractor', '20', 'Yes', 'No'],
   ['PAINTING-V1', 40, 'Preparation', 'Primer application and sanding', 2, 'Painting Contractor', '30', 'Yes', 'No'],
@@ -79,7 +86,8 @@ export const PAINTING_WORKFLOW = [
 ];
 
 export const INTERIOR_WORKFLOW = [
-  ['INTERIOR-V1', 10, 'Discovery', 'Site measurement and client lifestyle brief', 2, 'Designer', '', 'Yes', 'No'],
+  ['INTERIOR-V1', 5, 'Resources', 'Collect project plans, photos and client documents', 1, 'Client', '', 'Yes', 'No'],
+  ['INTERIOR-V1', 10, 'Discovery', 'Site measurement and client lifestyle brief', 2, 'Designer', '5', 'Yes', 'No'],
   ['INTERIOR-V1', 20, 'Planning', 'Scope, budget and timeline approval', 3, 'Client', '10', 'Yes', 'Yes'],
   ['INTERIOR-V1', 30, 'Design', 'Concept, layout and mood board', 5, 'Designer', '20', 'Yes', 'No'],
   ['INTERIOR-V1', 40, 'Design', 'Detailed drawings and material schedule', 6, 'Designer', '30', 'Yes', 'No'],

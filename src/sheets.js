@@ -81,9 +81,21 @@ export class SheetStore {
     const existing = await this.rows('WorkflowTemplates');
     const known = new Set(existing.map((row) => row.WorkflowID));
     for (const [workflowId, steps] of Object.entries(WORKFLOWS)) {
-      if (known.has(workflowId)) continue;
-      for (const [WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone] of steps) {
+      if (!known.has(workflowId)) {
+        for (const [WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone] of steps) {
+          await this.append('WorkflowTemplates', { WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone });
+        }
+        continue;
+      }
+      const workflowRows = existing.filter((row) => row.WorkflowID === workflowId);
+      const resourceStep = steps.find((step) => Number(step[1]) === 5);
+      if (resourceStep && !workflowRows.some((row) => Number(row.Sequence) === 5)) {
+        const [WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone] = resourceStep;
         await this.append('WorkflowTemplates', { WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone });
+      }
+      const firstOperationalStep = workflowRows.find((row) => Number(row.Sequence) === 10);
+      if (firstOperationalStep && firstOperationalStep.PredecessorTemplateID !== '5') {
+        await this.updateRow('WorkflowTemplates', firstOperationalStep.rowNumber, { PredecessorTemplateID: '5' });
       }
     }
   }
@@ -178,6 +190,14 @@ export class SheetStore {
     return (await this.rows('ProjectResources'))
       .filter((resource) => resource.WorkflowID === workflowId && resource.Active === 'Yes')
       .sort((left, right) => Number(left.SortOrder || 0) - Number(right.SortOrder || 0));
+  }
+
+  async saveSubmittedResource({ projectId, taskId, groupChatId, user, resourceType, fileId, fileName, caption }) {
+    await this.append('SubmittedResources', {
+      SubmissionID: id('RES'), ProjectID: projectId, TaskID: taskId, GroupChatID: String(groupChatId),
+      TelegramUserID: String(user.id), SubmittedByName: user.name, ResourceType: resourceType,
+      TelegramFileID: fileId, FileName: fileName, Caption: caption, SubmittedAt: now(),
+    });
   }
 
   async closeProject({ project, outcome, actorTelegramId, actorName }) {

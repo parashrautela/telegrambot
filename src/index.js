@@ -107,9 +107,6 @@ function planOverview(workflow) {
 
 async function shareWorkflowResources(project, workflowId) {
   const resources = await store.resourcesForWorkflow(workflowId);
-  if (!resources.length) {
-    return sendMessage(config.groupToken, project.GroupChatID, 'The workflow is assigned. No project resource pack has been linked yet; the founder can add plan links, photos, PDFs, or reference files to the <code>ProjectResources</code> sheet.');
-  }
   for (const resource of resources) {
     const caption = `<b>${escape(resource.Title)}</b>${resource.Description ? `\n${escape(resource.Description)}` : ''}`;
     try {
@@ -120,6 +117,41 @@ async function shareWorkflowResources(project, workflowId) {
       console.error(`Could not share resource ${resource.ResourceID}:`, error.message);
     }
   }
+}
+
+async function requestClientResources(project, workflow) {
+  const resourceTask = workflow.find((task) => task.Stage === 'Resources');
+  if (!resourceTask) return;
+  await sendMessage(config.groupToken, project.GroupChatID, `<b>First step — project resources</b>\n\nHi <b>${escape(project.ClientName || 'there')}</b> 👋 Please share all relevant project material here so we can begin: plans, drawings, photos, measurements, approvals, reference images, and existing documents.\n\nThis is the first task in the <b>${escape(project.ProjectName)}</b> workflow. You can send files and photos directly in this group; I’ll log them for the project team.`);
+}
+
+async function handleProjectResourceUpload(message) {
+  if (!groupOnly(message.chat) || (!message.document && !message.photo?.length)) return;
+  const project = await store.projectForGroup(message.chat.id);
+  if (!project || ['Completed', 'Abandoned'].includes(project.Status)) return;
+  const user = actor(message.from);
+  const knownUser = await store.user(message.from.id);
+  const maySubmit = String(message.from.id) === config.founderTelegramId || /\bclient\b/i.test(knownUser?.Role || '');
+  if (!maySubmit) return;
+  const task = (await store.tasksForProject(project.ProjectID)).find((item) => item.Stage === 'Resources' && item.Status !== 'Completed');
+  if (!task) return;
+  const document = message.document;
+  const photo = message.photo?.at(-1);
+  const resourceType = document ? 'Document' : 'Photo';
+  const fileId = document?.file_id || photo?.file_id;
+  const fileName = document?.file_name || `photo-${message.message_id}`;
+  await store.saveSubmittedResource({
+    projectId: project.ProjectID, taskId: task.TaskID, groupChatId: message.chat.id, user,
+    resourceType, fileId, fileName, caption: message.caption || '',
+  });
+  await store.updateRow('Tasks', task.rowNumber, {
+    Status: 'Resources received — Review needed',
+    LastUpdatedAt: new Date().toISOString(),
+    LastUpdatedBy: String(user.id),
+  });
+  await store.audit({ projectId: project.ProjectID, taskId: task.TaskID, action: 'Project resource submitted', oldValue: task.Status, newValue: 'Resources received — Review needed', actor: user.id, actorName: user.name, source: 'Telegram group bot', details: `${resourceType}: ${fileName}` });
+  await sendMessage(config.groupToken, message.chat.id, `✅ Thanks ${escape(user.name)} — I logged this ${resourceType.toLowerCase()} under the project resources. The founder can review it before moving to the next step.`);
+  return sendMessage(config.leaderToken, project.LeaderTelegramID || config.founderTelegramId, `📎 <b>Project resource received</b>\n\nProject: ${escape(project.ProjectName)}\nFrom: ${escape(user.name)}\nFile: ${escape(fileName)}\n\nThe Resources task is ready for your review.`);
 }
 
 function isUntouchedLegacyPlan(project, tasks) {
@@ -517,6 +549,8 @@ async function leaderNaturalLanguageReply(message) {
     const projectTasks = project ? await store.tasksForProject(project.ProjectID) : [];
     const legacyPlan = project && isUntouchedLegacyPlan(project, projectTasks);
     if (project && /\bclient\b/i.test(role) && (!projectTasks.length || legacyPlan)) {
+      await store.updateRow('Projects', project.rowNumber, { ClientName: name });
+      project.ClientName = name;
       await askFounderForPlan({ project, clientName: name, replaceUntouchedLegacyPlan: legacyPlan });
       return sendMessage(config.leaderToken, message.chat.id, `✅ ${escape(name)} is now active as ${escape(role)}. I’ve also asked which workflow to assign.`);
     }
@@ -589,6 +623,7 @@ async function leaderCallback(callback) {
       await answerCallback(config.leaderToken, callback.id, 'Project plan assigned.');
       await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(option.label)}</b> assigned to <b>${escape(project.ProjectName)}</b>.\n${result.taskCount} tasks generated. Planned finish: ${escape(result.targetEndDate)}.`);
       await sendMessage(config.groupToken, project.GroupChatID, `<b>Project plan assigned — ${escape(option.label)}</b>\n\n${planOverview(result.workflow)}\n\n${result.taskCount} tasks are now active. Use /tasks to see the full plan.`);
+      await requestClientResources(project, result.workflow);
       await shareWorkflowResources(project, workflowId);
       return;
     } catch (error) {
@@ -643,6 +678,7 @@ async function leaderCallback(callback) {
 }
 
 poll(config.groupToken, 'Project group bot', async (update) => {
+  if (update.message) await handleProjectResourceUpload(update.message);
   if (update.message?.text) {
     const mentioned = update.message.text.toLowerCase().includes(groupBotMention);
     console.log(`Group bot received update ${update.update_id} in ${update.message.chat.type}; mentioned: ${mentioned}; command: ${update.message.text.startsWith('/')}.`);

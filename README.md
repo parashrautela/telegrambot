@@ -6,6 +6,7 @@ Studio Iksha is a two-bot Telegram workspace for construction and interior proje
 
 - Client-led plan assignment: after the founder approves a joining member as the client, the founder chooses a workflow before tasks are generated.
 - Four built-in workflow choices: new home/construction, restoration, painting and finishes, and interior renovation.
+- Every workflow begins with a client-facing Resources task that requests plans, drawings, photos, measurements, approvals, and reference material in the project group.
 - Plan-linked resource delivery for documents, photo URLs or Telegram file IDs stored in Google Sheets.
 - Google Sheets tracking for projects, tasks, dates, delays, issues, approvals, users, onboarding, and audit logs.
 - A conversational founder assistant for normal chat, project questions, clarifications, and small talk, alongside plain-English project requests.
@@ -78,6 +79,8 @@ For a newly created project, task generation waits until a joining member is app
 
 Selecting a plan generates only that plan’s tasks, calculates the target date, and posts a compact plan overview in the project group. Later client-side members can be approved normally; they do not replace an already assigned plan.
 
+Immediately after plan selection, the group bot asks the approved client to share all relevant project assets directly in the group. Client and founder uploads are logged against the Resources task and sent to the founder for review before the next work stage begins.
+
 Projects created before this feature may already have an untouched default house plan. When their first client is approved, the founder receives the same picker. Selecting an option archives the unused legacy task rows and adds new, separately identified task rows for the chosen plan. Nothing is deleted.
 
 ### Share plan resources
@@ -146,6 +149,7 @@ The founder bot keeps a short, in-memory window of the recent private chat so fo
 | `Users` | Active Telegram users and roles. |
 | `MemberOnboarding` | Join events and founder approvals. |
 | `ProjectResources` | Plan-linked documents, photos, and reference links that the bot shares with the group. |
+| `SubmittedResources` | Photos and documents supplied by the client or founder in the project group. |
 | `GroupRegistry` | Groups available for project linking. |
 | `Approvals` | Delay approvals. |
 | `AuditLog` | Operational history. |
