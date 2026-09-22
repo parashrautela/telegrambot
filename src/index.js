@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import { aiEnabled, chatWithFounder, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
-import { answerCallback, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
+import { answerCallback, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
 
 const config = botConfig();
 const store = new SheetStore();
@@ -136,6 +136,38 @@ async function askFounderForPlan({ project, clientName, replaceUntouchedLegacyPl
 // Telegram reports a group owner's status as "creator". Include it so founder
 // departures are detected just like administrator or member departures.
 const joinedStatus = new Set(['creator', 'owner', 'member', 'administrator', 'restricted']);
+
+async function recoverFounderDepartureAlerts() {
+  const auditEntries = await store.rows('AuditLog');
+  const projects = (await store.rows('Projects')).filter((project) => !['Completed', 'Abandoned'].includes(project.Status));
+  for (const project of projects) {
+    if (auditEntries.some((entry) => entry.ProjectID === project.ProjectID && entry.Action === 'Founder left project group')) continue;
+    try {
+      const member = await getChatMember(config.groupToken, project.GroupChatID, config.founderTelegramId);
+      if (joinedStatus.has(member.status)) continue;
+      await store.audit({
+        projectId: project.ProjectID,
+        action: 'Founder left project group',
+        oldValue: 'Unknown',
+        newValue: member.status,
+        actor: config.founderTelegramId,
+        actorName: 'Founder',
+        source: 'Startup membership check',
+        details: 'Founder absence detected after a restart; awaiting closure decision. No project data changed.',
+      });
+      await sendMessage(config.leaderToken, config.founderTelegramId, `<b>You are no longer in ${escape(project.ProjectName)}</b>\n\nShould I close this project as completed or abandoned? Nothing will be deleted either way.`, {
+        inline_keyboard: [[
+          { text: 'Mark completed', callback_data: `close_project:${project.ProjectID}:completed` },
+          { text: 'Mark abandoned', callback_data: `close_project:${project.ProjectID}:abandoned` },
+        ], [{ text: 'I left by accident — keep active', callback_data: `close_project:${project.ProjectID}:keep_active` }]],
+      });
+    } catch (error) {
+      console.warn(`Could not check founder membership for ${project.ProjectID}:`, error.message);
+    }
+  }
+}
+
+await recoverFounderDepartureAlerts();
 
 async function welcomeNewProjectMember(update) {
   const change = update.chat_member;

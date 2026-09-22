@@ -19,6 +19,7 @@ export const sendDocument = (token, chatId, document, caption = '') => api(token
 export const answerCallback = (token, callbackId, text = '') => api(token, 'answerCallbackQuery', { callback_query_id: callbackId, text });
 export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query', 'chat_member'] });
 export const getMe = (token) => api(token, 'getMe');
+export const getChatMember = (token, chatId, userId) => api(token, 'getChatMember', { chat_id: chatId, user_id: userId });
 
 export async function poll(token, label, onUpdate) {
   let offset = 0;
