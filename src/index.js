@@ -148,6 +148,33 @@ async function welcomeNewProjectMember(update) {
   return sendMessage(config.leaderToken, config.founderTelegramId, `<b>New project member joined</b>\n\nName: ${escape(memberName)}\nProject: ${escape(project.ProjectName)}\nJoined: ${new Date(change.date * 1000).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nPlease assign their profile and role before they can update project tasks.`, { inline_keyboard: [[{ text: 'Assign role', callback_data: `onboard_role:${onboardingId}` }]] });
 }
 
+async function handleFounderGroupDeparture(update) {
+  const change = update.chat_member;
+  if (!change || !groupOnly(change.chat)) return;
+  const member = change.new_chat_member?.user;
+  const oldStatus = change.old_chat_member?.status;
+  const newStatus = change.new_chat_member?.status;
+  if (!member || String(member.id) !== config.founderTelegramId || !joinedStatus.has(oldStatus) || !['left', 'kicked'].includes(newStatus)) return;
+  const project = await store.projectForGroup(change.chat.id);
+  if (!project || ['Completed', 'Abandoned'].includes(project.Status)) return;
+  await store.audit({
+    projectId: project.ProjectID,
+    action: 'Founder left project group',
+    oldValue: oldStatus,
+    newValue: newStatus,
+    actor: member.id,
+    actorName: actor(member).name,
+    source: 'Telegram group bot',
+    details: 'Awaiting founder closure decision; no project data changed.',
+  });
+  return sendMessage(config.leaderToken, config.founderTelegramId, `<b>You left ${escape(project.ProjectName)}</b>\n\nShould I close this project as completed or abandoned? Nothing will be deleted either way.`, {
+    inline_keyboard: [[
+      { text: 'Mark completed', callback_data: `close_project:${project.ProjectID}:completed` },
+      { text: 'Mark abandoned', callback_data: `close_project:${project.ProjectID}:abandoned` },
+    ], [{ text: 'I left by accident — keep active', callback_data: `close_project:${project.ProjectID}:keep_active` }]],
+  });
+}
+
 async function showProjects(chatId) {
   const projects = await store.rows('Projects');
   const lines = await Promise.all(projects.map(async (project) => {
@@ -202,6 +229,11 @@ async function requireProject(chat, token) {
   if (!project) {
     await store.registerGroup(chat.id, chat.title || 'Unnamed project group');
     await sendMessage(token, chat.id, `This group is registered and ready to link to a project.\nGroup Chat ID: <code>${chat.id}</code>\nOpen the founder bot and use /createproject.`);
+    return null;
+  }
+  if (['Completed', 'Abandoned'].includes(project.Status)) {
+    await sendMessage(token, chat.id, `This project is <b>${escape(project.Status.toLowerCase())}</b>. Its history is retained, but task updates are closed.`);
+    return null;
   }
   return project;
 }
@@ -468,6 +500,29 @@ async function leaderNaturalLanguageReply(message) {
 }
 
 async function leaderCallback(callback) {
+  if (callback.data.startsWith('close_project:')) {
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can close a project.');
+    const [, projectId, decision] = callback.data.split(':');
+    const project = await store.projectById(projectId);
+    if (!project) return answerCallback(config.leaderToken, callback.id, 'This project no longer exists.');
+    if (decision === 'keep_active') {
+      await store.audit({ projectId, action: 'Founder departure dismissed', actor: callback.from.id, actorName: actor(callback.from).name, source: 'Telegram founder bot', details: 'Founder chose to keep the project active.' });
+      await answerCallback(config.leaderToken, callback.id, 'Project remains active.');
+      return sendMessage(config.leaderToken, callback.message.chat.id, `Got it — <b>${escape(project.ProjectName)}</b> remains active. Nothing was changed.`);
+    }
+    const outcome = decision === 'completed' ? 'Completed' : decision === 'abandoned' ? 'Abandoned' : '';
+    if (!outcome) return answerCallback(config.leaderToken, callback.id, 'Unknown project-closure decision.');
+    if (['Completed', 'Abandoned'].includes(project.Status)) return answerCallback(config.leaderToken, callback.id, 'This project is already closed.');
+    try {
+      const result = await store.closeProject({ project, outcome, actorTelegramId: callback.from.id, actorName: actor(callback.from).name });
+      await answerCallback(config.leaderToken, callback.id, `Project marked ${outcome.toLowerCase()}.`);
+      await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(project.ProjectName)}</b> is now <b>${outcome.toLowerCase()}</b>.\n\nNo data was deleted. ${result.closedTasks} unfinished task(s) were closed, and ${result.deactivatedMembers} project member record(s) were deactivated.`);
+      return sendMessage(config.groupToken, project.GroupChatID, `<b>Project closed — ${escape(outcome)}</b>\n\nThe founder closed this project. Its full history is retained, but task updates are no longer active.`);
+    } catch (error) {
+      console.error('Project closure error:', error.message);
+      return answerCallback(config.leaderToken, callback.id, 'Could not close this project. Check the Railway logs.');
+    }
+  }
   if (callback.data.startsWith('choose_plan:')) {
     if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can assign a project plan.');
     const [, projectId, workflowId] = callback.data.split(':');
@@ -555,7 +610,10 @@ poll(config.groupToken, 'Project group bot', async (update) => {
     }
   }
   if (update.callback_query) await groupCallback(update.callback_query);
-  if (update.chat_member) await welcomeNewProjectMember(update);
+  if (update.chat_member) {
+    await handleFounderGroupDeparture(update);
+    await welcomeNewProjectMember(update);
+  }
 });
 poll(config.leaderToken, 'Founder bot', async (update) => {
   if (update.message?.text?.startsWith('/')) await leaderCommand(update.message);

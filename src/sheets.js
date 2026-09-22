@@ -180,6 +180,51 @@ export class SheetStore {
       .sort((left, right) => Number(left.SortOrder || 0) - Number(right.SortOrder || 0));
   }
 
+  async closeProject({ project, outcome, actorTelegramId, actorName }) {
+    const closedAt = now();
+    const isCompleted = outcome === 'Completed';
+    const taskStatus = isCompleted ? 'Closed — Project completed' : 'Cancelled — Project abandoned';
+    const activeTaskStatuses = new Set(['Completed', 'Archived', 'Closed — Project completed', 'Cancelled — Project abandoned']);
+    const tasks = await this.tasksForProject(project.ProjectID);
+    const pendingApprovals = (await this.rows('Approvals')).filter((approval) => approval.ProjectID === project.ProjectID && approval.Status === 'Pending');
+    const members = (await this.rows('MemberOnboarding')).filter((member) => member.ProjectID === project.ProjectID && ['Pending', 'Approved'].includes(member.Status));
+
+    for (const task of tasks) {
+      if (activeTaskStatuses.has(task.Status)) continue;
+      await this.updateRow('Tasks', task.rowNumber, {
+        Status: taskStatus,
+        ApprovalStatus: 'Closed',
+        LastUpdatedAt: closedAt,
+        LastUpdatedBy: String(actorTelegramId),
+      });
+    }
+    for (const approval of pendingApprovals) {
+      await this.updateRow('Approvals', approval.rowNumber, {
+        Status: 'Closed',
+        DecidedAt: closedAt,
+        DecidedByTelegramID: String(actorTelegramId),
+      });
+    }
+    for (const member of members) {
+      await this.updateRow('MemberOnboarding', member.rowNumber, { Status: 'Inactive — Project closed' });
+    }
+    await this.updateRow('Projects', project.rowNumber, {
+      Status: outcome,
+      Notes: `${outcome} by founder after leaving the project group on ${closedAt}. Historical data retained.`,
+    });
+    await this.audit({
+      projectId: project.ProjectID,
+      action: `Project ${outcome.toLowerCase()}`,
+      oldValue: project.Status,
+      newValue: outcome,
+      actor: actorTelegramId,
+      actorName,
+      source: 'Telegram founder bot',
+      details: `${tasks.filter((task) => !activeTaskStatuses.has(task.Status)).length} open task(s) moved to ${taskStatus}; ${members.length} project member record(s) deactivated; data retained.`,
+    });
+    return { closedTasks: tasks.filter((task) => !activeTaskStatuses.has(task.Status)).length, deactivatedMembers: members.length };
+  }
+
   async requestDelay({ project, task, actor, days, reason }) {
     const approvalId = id('APR');
     await this.append('Approvals', {

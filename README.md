@@ -12,6 +12,7 @@ Studio Iksha is a two-bot Telegram workspace for construction and interior proje
 - Group updates through commands or a plain-English mention of the group bot.
 - AI drafts require confirmation before changing a task; delay requests also need founder approval.
 - New-member onboarding: project TLDR in the group, private founder role approval, and a pending state until approved.
+- Founder-departure protection: a private prompt asks whether a project is completed, abandoned, or still active after the founder leaves its group.
 - Railway-ready, always-on deployment.
 
 ## Architecture
@@ -92,6 +93,15 @@ The bot reads active rows from the `ProjectResources` tab after a plan is select
 | `Active` | Set to `Yes` to share it. |
 
 The bot does not invent photos or documents. If a plan has no active resource rows, it says so in the group and the project can continue normally.
+
+### Close a project after the founder leaves
+
+If the founder leaves a linked project group, the founder bot sends three choices: **Mark completed**, **Mark abandoned**, or **I left by accident — keep active**. Nothing happens until the founder taps one.
+
+- **Completed** closes unfinished tasks as `Closed — Project completed`.
+- **Abandoned** moves unfinished tasks to `Cancelled — Project abandoned`.
+- In both cases, pending approvals are closed and project membership records become inactive for that project only.
+- The project, tasks, approvals, members, updates, and audit history stay in Google Sheets. No operational data is deleted.
 
 > Make the group bot an administrator in every project group. Telegram only delivers member-join events to administrator bots.
 
