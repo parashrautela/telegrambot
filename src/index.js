@@ -133,7 +133,9 @@ async function askFounderForPlan({ project, clientName, replaceUntouchedLegacyPl
   });
 }
 
-const joinedStatus = new Set(['member', 'administrator', 'restricted']);
+// Telegram reports a group owner's status as "creator". Include it so founder
+// departures are detected just like administrator or member departures.
+const joinedStatus = new Set(['creator', 'owner', 'member', 'administrator', 'restricted']);
 
 async function welcomeNewProjectMember(update) {
   const change = update.chat_member;
