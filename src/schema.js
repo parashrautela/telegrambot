@@ -1,3 +1,5 @@
+import { residentialInteriorTuples } from './residential-interior.js';
+
 export const SHEETS = {
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
@@ -6,6 +8,7 @@ export const SHEETS = {
   WorkflowTemplates: [
     'WorkflowID', 'Sequence', 'Stage', 'TaskName', 'DurationDays',
     'DefaultRole', 'PredecessorTemplateID', 'Required', 'Milestone',
+    'DependencySequences', 'DependencyType', 'GateType', 'Audience', 'Phase', 'Trade', 'TemplateVersion',
   ],
   Tasks: [
     'TaskID', 'ProjectID', 'WorkflowID', 'TemplateID', 'Sequence', 'Stage',
@@ -13,6 +16,9 @@ export const SHEETS = {
     'PlannedStart', 'PlannedEnd', 'CurrentStart', 'CurrentEnd', 'DelayDays',
     'DelayReason', 'IssueText', 'ApprovalStatus', 'ReworkCycle',
     'PredecessorTaskID', 'CalendarEventID', 'LastUpdatedAt', 'LastUpdatedBy',
+    'PredecessorTaskIDs', 'DependencyType', 'ForecastStart', 'ForecastEnd',
+    'ActualStart', 'ActualEnd', 'GateType', 'Audience', 'Phase', 'Trade',
+    'TemplateVersion', 'BlockedReason',
   ],
   Users: ['TelegramUserID', 'Name', 'Role', 'Active'],
   MemberOnboarding: [
@@ -36,6 +42,14 @@ export const SHEETS = {
   AuditLog: [
     'AuditID', 'OccurredAt', 'ProjectID', 'TaskID', 'Action', 'OldValue',
     'NewValue', 'ActorTelegramID', 'ActorName', 'Source', 'Details',
+  ],
+  FileRevisions: [
+    'RevisionID', 'ProjectID', 'TaskID', 'Stage', 'Version', 'FileName',
+    'StorageRef', 'UploaderRole', 'Audience', 'ApprovalState', 'ParentRevisionID', 'UploadedAt',
+  ],
+  ReviewDecisions: [
+    'DecisionID', 'ProjectID', 'TaskID', 'RevisionID', 'Stage', 'Outcome',
+    'ReviewerRole', 'ReviewerName', 'Comments', 'DecidedAt',
   ],
 };
 
@@ -105,11 +119,24 @@ export const WORKFLOWS = {
   'RESTORATION-V1': RESTORATION_WORKFLOW,
   'PAINTING-V1': PAINTING_WORKFLOW,
   'INTERIOR-V1': INTERIOR_WORKFLOW,
+  'RESIDENTIAL-INTERIOR-V1': residentialInteriorTuples(),
 };
+
+export function templateRecord(step) {
+  const [
+    WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone,
+    DependencySequences = '', DependencyType = '', GateType = '', Audience = '', Phase = '', Trade = '', TemplateVersion = '',
+  ] = step;
+  return {
+    WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone,
+    DependencySequences, DependencyType, GateType, Audience, Phase, Trade, TemplateVersion,
+  };
+}
 
 export const WORKFLOW_OPTIONS = [
   { id: 'HOUSE-V1', label: 'New home / construction', description: 'Full house-building workflow' },
   { id: 'RESTORATION-V1', label: 'Restoration', description: 'Repair and restore an existing property' },
   { id: 'PAINTING-V1', label: 'Painting & finishes', description: 'Painting-led refresh workflow' },
   { id: 'INTERIOR-V1', label: 'Interior renovation', description: 'Interior design and execution workflow' },
+  { id: 'RESIDENTIAL-INTERIOR-V1', label: 'Residential interior (parallel)', description: 'Design first, then overlapping trades with approval and material gates' },
 ];

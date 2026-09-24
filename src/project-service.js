@@ -1,3 +1,5 @@
+import { buildScheduledTasks, isGraphTemplate } from './workflow-engine.js';
+
 const dateText = (date) => date.toISOString().slice(0, 10);
 const plusDays = (date, days) => new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 const taskId = (projectId, sequence) => `${projectId}-T${String(sequence / 10).padStart(3, '0')}`;
@@ -44,7 +46,10 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
     .sort((left, right) => Number(left.Sequence) - Number(right.Sequence));
   if (!workflow.length) throw new Error(`${workflowId} is missing from WorkflowTemplates.`);
   const startDate = validStartDate(project.StartDate);
-  const targetEndDate = dateText(plusDays(startDate, workflow.reduce((total, template) => total + Number(template.DurationDays), 0) - 1));
+  const graphTemplate = isGraphTemplate(workflow);
+  const targetEndDate = graphTemplate
+    ? ''
+    : dateText(plusDays(startDate, workflow.reduce((total, template) => total + Number(template.DurationDays), 0) - 1));
   if (replaceUntouchedLegacyPlan) {
     for (const task of existingTasks) {
       await store.updateRow('Tasks', task.rowNumber, {
@@ -56,35 +61,53 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
     }
   }
   const taskIdPrefix = existingTasks.length ? `${project.ProjectID}-${workflowId.split('-')[0]}` : project.ProjectID;
-  let cursor = startDate;
-  for (const template of workflow) {
-    const duration = Number(template.DurationDays);
-    const plannedStart = cursor;
-    const plannedEnd = plusDays(plannedStart, duration - 1);
-    const predecessor = template.PredecessorTemplateID ? taskId(taskIdPrefix, Number(template.PredecessorTemplateID)) : '';
-    await store.append('Tasks', {
-      TaskID: taskId(taskIdPrefix, Number(template.Sequence)), ProjectID: project.ProjectID,
-      WorkflowID: template.WorkflowID, TemplateID: `${template.WorkflowID}-${template.Sequence}`,
-      Sequence: template.Sequence, Stage: template.Stage, TaskName: template.TaskName,
-      AssignedRole: template.DefaultRole, Status: 'Pending',
-      PlannedStart: dateText(plannedStart), PlannedEnd: dateText(plannedEnd),
-      CurrentStart: dateText(plannedStart), CurrentEnd: dateText(plannedEnd),
-      ApprovalStatus: 'Not Required', ReworkCycle: '0', PredecessorTaskID: predecessor,
-      LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(actorTelegramId || 'System'),
-    });
-    cursor = plusDays(plannedEnd, 1);
+  let scheduledTargetEnd = targetEndDate;
+  if (graphTemplate) {
+    const scheduled = buildScheduledTasks(workflow, { startDate: project.StartDate, taskIdPrefix });
+    scheduledTargetEnd = scheduled.targetEndDate;
+    for (const task of scheduled.tasks) {
+      await store.append('Tasks', {
+        ...task,
+        ProjectID: project.ProjectID,
+        LastUpdatedAt: new Date().toISOString(),
+        LastUpdatedBy: String(actorTelegramId || 'System'),
+      });
+    }
+  } else {
+    let cursor = startDate;
+    for (const template of workflow) {
+      const duration = Number(template.DurationDays);
+      const plannedStart = cursor;
+      const plannedEnd = plusDays(plannedStart, duration - 1);
+      const predecessor = template.PredecessorTemplateID ? taskId(taskIdPrefix, Number(template.PredecessorTemplateID)) : '';
+      await store.append('Tasks', {
+        TaskID: taskId(taskIdPrefix, Number(template.Sequence)), ProjectID: project.ProjectID,
+        WorkflowID: template.WorkflowID, TemplateID: `${template.WorkflowID}-${template.Sequence}`,
+        Sequence: template.Sequence, Stage: template.Stage, TaskName: template.TaskName,
+        AssignedRole: template.DefaultRole, Status: 'Pending',
+        PlannedStart: dateText(plannedStart), PlannedEnd: dateText(plannedEnd),
+        CurrentStart: dateText(plannedStart), CurrentEnd: dateText(plannedEnd),
+        ApprovalStatus: 'Not Required', ReworkCycle: '0', PredecessorTaskID: predecessor,
+        LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(actorTelegramId || 'System'),
+      });
+      cursor = plusDays(plannedEnd, 1);
+    }
   }
   await store.updateRow('Projects', project.rowNumber, {
     ClientName: clientName || project.ClientName,
     Status: 'Active',
-    TargetEndDate: targetEndDate,
+    TargetEndDate: scheduledTargetEnd,
     Notes: `Workflow ${workflowId} assigned after client onboarding${replaceUntouchedLegacyPlan ? '; untouched legacy HOUSE-V1 tasks archived.' : ''}`,
   });
   await store.audit({
     projectId: project.ProjectID, action: replaceUntouchedLegacyPlan ? 'Legacy workflow replaced' : 'Workflow assigned', newValue: `${workflowId}; ${workflow.length} tasks generated`,
-    actor: actorTelegramId || 'System', actorName: 'Founder', source: 'Project generator', details: `Target end ${targetEndDate}${replaceUntouchedLegacyPlan ? `; ${existingTasks.length} legacy task(s) archived` : ''}`,
+    actor: actorTelegramId || 'System', actorName: 'Founder', source: 'Project generator', details: `Target end ${scheduledTargetEnd || 'unconfirmed durations'}${replaceUntouchedLegacyPlan ? `; ${existingTasks.length} legacy task(s) archived` : ''}`,
   });
-  return { taskCount: workflow.length, targetEndDate, workflow };
+  return {
+    taskCount: workflow.length,
+    targetEndDate: scheduledTargetEnd || 'Unconfirmed — template durations are not set',
+    workflow,
+  };
 }
 
 // Kept for the demo script and backwards compatibility. Founder-created
