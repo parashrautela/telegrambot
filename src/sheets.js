@@ -1,10 +1,20 @@
 import crypto from 'node:crypto';
 import { googleConfig } from './config.js';
-import { SHEETS, WORKFLOWS } from './schema.js';
+import { SHEETS, WORKFLOWS, templateRecord } from './schema.js';
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
 
+const columnLetter = (index) => {
+  let number = index + 1;
+  let letter = '';
+  while (number > 0) {
+    const remainder = (number - 1) % 26;
+    letter = String.fromCharCode(65 + remainder) + letter;
+    number = Math.floor((number - 1) / 26);
+  }
+  return letter;
+};
 const base64Url = (value) => Buffer.from(value).toString('base64url');
 const now = () => new Date().toISOString();
 const id = (prefix) => `${prefix}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
@@ -82,11 +92,10 @@ export class SheetStore {
     const known = new Set(existing.map((row) => row.WorkflowID));
     for (const [workflowId, steps] of Object.entries(WORKFLOWS)) {
       if (!known.has(workflowId)) {
-        for (const [WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone] of steps) {
-          await this.append('WorkflowTemplates', { WorkflowID, Sequence, Stage, TaskName, DurationDays, DefaultRole, PredecessorTemplateID, Required, Milestone });
-        }
+        for (const step of steps) await this.append('WorkflowTemplates', templateRecord(step));
         continue;
       }
+      if (steps.some((step) => step[9])) continue;
       const workflowRows = existing.filter((row) => row.WorkflowID === workflowId);
       const resourceStep = steps.find((step) => Number(step[1]) === 5);
       if (resourceStep && !workflowRows.some((row) => Number(row.Sequence) === 5)) {
@@ -101,7 +110,7 @@ export class SheetStore {
   }
 
   async rows(sheetName) {
-    const response = await this.request(`/values/${encodeURIComponent(`${sheetName}!A:Z`)}`);
+    const response = await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}`);
     const values = response.values ?? [];
     const [headers = [], ...data] = values;
     return data.filter((row) => row.some(Boolean)).map((row, index) => ({
@@ -113,7 +122,7 @@ export class SheetStore {
   async append(sheetName, object) {
     const headers = SHEETS[sheetName];
     const values = headers.map((header) => object[header] ?? '');
-    await this.request(`/values/${encodeURIComponent(`${sheetName}!A:Z`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+    await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
       method: 'POST', body: JSON.stringify({ values: [values] }),
     });
   }
@@ -123,7 +132,7 @@ export class SheetStore {
     const requests = Object.entries(changes).map(([field, value]) => {
       const column = headers.indexOf(field);
       if (column < 0) throw new Error(`Unknown ${sheetName} field: ${field}`);
-      const letter = String.fromCharCode(65 + column);
+      const letter = columnLetter(column);
       return { range: `${sheetName}!${letter}${rowNumber}`, values: [[value]] };
     });
     await this.request('/values:batchUpdate', {
@@ -243,6 +252,21 @@ export class SheetStore {
       details: `${tasks.filter((task) => !activeTaskStatuses.has(task.Status)).length} open task(s) moved to ${taskStatus}; ${members.length} project member record(s) deactivated; data retained.`,
     });
     return { closedTasks: tasks.filter((task) => !activeTaskStatuses.has(task.Status)).length, deactivatedMembers: members.length };
+  }
+
+  async revisionsForTask(taskId) {
+    return (await this.rows('FileRevisions')).filter((revision) => revision.TaskID === taskId);
+  }
+
+  async addDraftRevision(revision) {
+    await this.append('FileRevisions', revision);
+  }
+
+  async saveReviewDecision(decision, revisionUpdate = null) {
+    await this.append('ReviewDecisions', decision);
+    if (!revisionUpdate) return;
+    const revision = (await this.rows('FileRevisions')).find((item) => item.RevisionID === decision.RevisionID);
+    if (revision) await this.updateRow('FileRevisions', revision.rowNumber, revisionUpdate);
   }
 
   async requestDelay({ project, task, actor, days, reason }) {

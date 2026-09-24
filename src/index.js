@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
+import { applyReviewDecision, completionBlockReason, createDraftRevision, dependencyEdges, forecastDelayImpact, previewTradeOrderOverride, resolveDrawing } from './workflow-engine.js';
 import { answerCallback, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
 
 const config = botConfig();
@@ -372,10 +373,18 @@ async function submitIssue({ project, task, user, issue, groupChatId }) {
   return sendMessage(config.leaderToken, recipientTelegramId, `⚠️ <b>Issue reported</b>\nProject: ${escape(project.ProjectName)}\nTask: ${escape(task.TaskName)}\nBy: ${escape(user.name)}\n\n${escape(issue)}`);
 }
 
-async function submitCompletion({ project, task, user, groupChatId }) {
-  await store.updateRow('Tasks', task.rowNumber, { Status: 'Completed', ApprovalStatus: '', LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(user.id) });
+async function finishTask({ project, task, user, token, chatId }) {
+  const tasks = await store.tasksForProject(project.ProjectID);
+  const revisions = task.GateType ? await store.revisionsForTask(task.TaskID) : [];
+  const block = completionBlockReason(task, tasks, revisions);
+  if (block) return sendMessage(token, chatId, `Cannot complete <b>${escape(task.TaskName)}</b>. ${escape(block)}.`);
+  await store.updateRow('Tasks', task.rowNumber, { Status: 'Completed', ApprovalStatus: task.GateType === 'approval' ? 'Client approved' : '', LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(user.id) });
   await store.audit({ projectId: project.ProjectID, taskId: task.TaskID, action: 'Task completed', oldValue: task.Status, newValue: 'Completed', actor: user.id, actorName: user.name, source: 'Telegram group bot' });
-  return sendMessage(config.groupToken, groupChatId, `✅ <b>${escape(task.TaskName)}</b> marked completed by ${escape(user.name)}.`);
+  return sendMessage(token, chatId, `✅ <b>${escape(task.TaskName)}</b> marked completed by ${escape(user.name)}.`);
+}
+
+async function submitCompletion({ project, task, user, groupChatId }) {
+  return finishTask({ project, task, user, token: config.groupToken, chatId: groupChatId });
 }
 
 async function interpretNaturalLanguage(message, project, naturalLanguageUpdate) {
@@ -431,9 +440,14 @@ async function groupCommand(message) {
     const task = await store.task(argumentsList[0]);
     if (!task || task.ProjectID !== project.ProjectID) return sendMessage(config.groupToken, message.chat.id, 'Task not found for this project. Use /tasks to get the task ID.');
     if (!(await verifyAssigned(task, message.from, config.groupToken, message.chat.id))) return;
-    await store.updateRow('Tasks', task.rowNumber, { Status: 'Completed', ApprovalStatus: '', LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(user.id) });
-    await store.audit({ projectId: project.ProjectID, taskId: task.TaskID, action: 'Task completed', oldValue: task.Status, newValue: 'Completed', actor: user.id, actorName: user.name, source: 'Telegram group bot' });
-    return sendMessage(config.groupToken, message.chat.id, `✅ <b>${escape(task.TaskName)}</b> marked completed by ${escape(user.name)}.`);
+    return finishTask({ project, task, user, token: config.groupToken, chatId: message.chat.id });
+  }
+  if (command === '/drawing') {
+    const task = await store.task(argumentsList[0]);
+    if (!task || task.ProjectID !== project.ProjectID) return sendMessage(config.groupToken, message.chat.id, 'Task not found for this project. Use /tasks to get the task ID.');
+    const drawing = resolveDrawing(await store.revisionsForTask(task.TaskID), 'Client');
+    if (!drawing.storageRef) return sendMessage(config.groupToken, message.chat.id, `<b>${escape(task.TaskName)}</b>\n${escape(drawing.status)}. ${escape(drawing.nextStep)}`);
+    return sendMessage(config.groupToken, message.chat.id, `<b>${escape(task.TaskName)}</b>\nLatest approved file: ${escape(drawing.revision.FileName || drawing.storageRef)}`);
   }
   if (command === '/delay') {
     const [taskId, daysText, ...reasonParts] = argumentsList;
@@ -468,7 +482,7 @@ async function leaderCommand(message) {
     return;
   }
   console.log(`Founder bot received ${message.text?.trim().split(/\s+/)[0] || 'a message'} from the configured founder.`);
-  if (command === '/start' || command === '/help') return sendMessage(config.leaderToken, message.chat.id, `<b>Founder bot commands</b>\n\n/createproject — create a project shell\n/plan P001 — choose a plan for a waiting or untouched legacy project\n/projects — list projects and progress\n/project P001 — view one project\n/adduser ID | Name | Role — register a team member\n/approvals — review pending requests\n/cancel — cancel the current project-creation flow`);
+  if (command === '/start' || command === '/help') return sendMessage(config.leaderToken, message.chat.id, `<b>Founder bot commands</b>\n\n/createproject — create a project shell\n/plan P001 — choose a plan for a waiting or untouched legacy project\n/projects — list projects and progress\n/project P001 — view one project\n/adduser ID | Name | Role — register a team member\n/approvals — review pending requests\n/draft TASK_ID file name | storage ref — record an internal drawing draft\n/review TASK_ID admin|client approved|rework|hold comment — record a drawing decision\n/drawing TASK_ID — show the latest internal drawing revision\n/tradeorder P001 Civil, Electrical — preview a project-only trade order change\n/tradeorder confirm P001 Civil, Electrical — apply that override to the project\n/cancel — cancel the current project-creation flow`);
   if (command === '/cancel') {
     projectCreation.delete(message.chat.id);
     return sendMessage(config.leaderToken, message.chat.id, 'Cancelled.');
@@ -519,6 +533,121 @@ async function leaderCommand(message) {
     const approvals = await store.approvals();
     const lines = approvals.map((item) => `• <code>${item.ApprovalID}</code> — ${escape(item.RequestType)} for <code>${item.TaskID}</code>: ${escape(item.Reason)}`);
     return sendMessage(config.leaderToken, message.chat.id, lines.length ? `<b>Pending approvals</b>\n\n${lines.join('\n')}` : 'No pending approvals.');
+  }
+  if (command === '/draft') {
+    const [taskId, ...rest] = message.text.trim().split(/\s+/).slice(1);
+    const [fileName, storageRef] = rest.join(' ').split('|').map((part) => part.trim());
+    const task = taskId && await store.task(taskId);
+    if (!task || !fileName || !storageRef) return sendMessage(config.leaderToken, message.chat.id, 'Usage: <code>/draft TASK_ID file name | storage ref</code>');
+    const existing = await store.revisionsForTask(task.TaskID);
+    const revision = createDraftRevision({
+      revisionId: `REV-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+      projectId: task.ProjectID,
+      taskId: task.TaskID,
+      stage: task.Stage,
+      version: existing.length + 1,
+      fileName,
+      storageRef,
+      uploaderRole: 'Designer',
+    });
+    await store.addDraftRevision(revision);
+    await store.audit({ projectId: task.ProjectID, taskId: task.TaskID, action: 'Draft revision recorded', newValue: revision.RevisionID, actor: message.from.id, actorName: actor(message.from).name, source: 'Telegram founder bot', details: fileName });
+    return sendMessage(config.leaderToken, message.chat.id, `Internal draft <code>${revision.RevisionID}</code> recorded for <b>${escape(task.TaskName)}</b>. It is not visible to the client or trade team.`);
+  }
+  if (command === '/review') {
+    const [taskId, stage, outcomeKey, ...commentParts] = message.text.trim().split(/\s+/).slice(1);
+    const outcomes = { approved: 'Approved', rework: 'Rework needed', hold: 'On hold' };
+    const outcome = outcomes[outcomeKey];
+    const task = taskId && await store.task(taskId);
+    if (!task || !['admin', 'client'].includes(stage) || !outcome) return sendMessage(config.leaderToken, message.chat.id, 'Usage: <code>/review TASK_ID admin|client approved|rework|hold comment</code>');
+    const revisions = await store.revisionsForTask(task.TaskID);
+    const revision = [...revisions].sort((left, right) => Number(left.Version) - Number(right.Version)).at(-1);
+    if (!revision) return sendMessage(config.leaderToken, message.chat.id, 'Record a draft with /draft before reviewing this task.');
+    let decision;
+    try {
+      decision = applyReviewDecision({ revision, stage, outcome, reviewerRole: 'Project admin' });
+    } catch (error) {
+      return sendMessage(config.leaderToken, message.chat.id, escape(error.message));
+    }
+    const decidedAt = new Date().toISOString();
+    await store.saveReviewDecision({
+      DecisionID: `DEC-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
+      ProjectID: task.ProjectID,
+      TaskID: task.TaskID,
+      RevisionID: revision.RevisionID,
+      Stage: stage,
+      Outcome: outcome,
+      ReviewerRole: 'Project admin',
+      ReviewerName: actor(message.from).name,
+      Comments: commentParts.join(' '),
+      DecidedAt: decidedAt,
+    }, { ApprovalState: decision.revision.ApprovalState, Audience: decision.revision.Audience });
+    const taskUpdate = { ApprovalStatus: decision.revision.ApprovalState, LastUpdatedAt: decidedAt, LastUpdatedBy: String(message.from.id) };
+    if (outcome === 'On hold') taskUpdate.Status = 'On hold';
+    await store.updateRow('Tasks', task.rowNumber, taskUpdate);
+    await store.audit({ projectId: task.ProjectID, taskId: task.TaskID, action: `Drawing review ${outcome.toLowerCase()}`, newValue: decision.revision.ApprovalState, actor: message.from.id, actorName: actor(message.from).name, source: 'Telegram founder bot', details: commentParts.join(' ') });
+    const reworkNote = outcome === 'Rework needed' ? '\nThe designer was not reassigned. Designer notification is still unresolved, so no alert was sent.' : '';
+    return sendMessage(config.leaderToken, message.chat.id, `Review recorded for <b>${escape(task.TaskName)}</b>: ${escape(decision.revision.ApprovalState)}.${reworkNote}`);
+  }
+  if (command === '/drawing') {
+    const task = await store.task(message.text.trim().split(/\s+/)[1]);
+    if (!task) return sendMessage(config.leaderToken, message.chat.id, 'Usage: <code>/drawing TASK_ID</code>');
+    const drawing = resolveDrawing(await store.revisionsForTask(task.TaskID), 'Project admin');
+    if (!drawing.storageRef) return sendMessage(config.leaderToken, message.chat.id, `<b>${escape(task.TaskName)}</b>\n${escape(drawing.status)}. ${escape(drawing.nextStep)}`);
+    return sendMessage(config.leaderToken, message.chat.id, `<b>${escape(task.TaskName)}</b>\nLatest internal revision: ${escape(drawing.revision.FileName)} (${escape(drawing.status)})\nRef: <code>${escape(drawing.storageRef)}</code>`);
+  }
+  if (command === '/tradeorder') {
+    const parts = message.text.trim().split(/\s+/).slice(1);
+    const confirming = parts[0] === 'confirm';
+    const projectId = confirming ? parts[1] : parts[0];
+    const order = (confirming ? parts.slice(2) : parts.slice(1)).join(' ').split(',').map((trade) => trade.trim()).filter(Boolean);
+    const project = projectId && await store.projectById(projectId);
+    if (!project || order.length < 2) return sendMessage(config.leaderToken, message.chat.id, 'Usage: <code>/tradeorder P001 Civil, Electrical, Plumbing</code>\nConfirm with <code>/tradeorder confirm P001 Civil, Electrical, Plumbing</code>');
+    const tasks = (await store.tasksForProject(project.ProjectID)).filter((task) => task.TemplateVersion);
+    if (!tasks.length) return sendMessage(config.leaderToken, message.chat.id, 'This project is not using a dependency-based plan.');
+    const byId = new Map(tasks.map((task) => [task.TaskID, task]));
+    const definitions = tasks.map((task) => ({
+      sequence: String(task.Sequence),
+      taskName: task.TaskName,
+      trade: task.Trade,
+      stage: task.Stage,
+      durationDays: task.ForecastStart && task.ForecastEnd ? String(Math.round((new Date(`${task.ForecastEnd}T00:00:00Z`) - new Date(`${task.ForecastStart}T00:00:00Z`)) / 86400000) + 1) : '',
+      predecessors: dependencyEdges(task).map((edge) => ({ sequence: String(byId.get(edge.id)?.Sequence || ''), type: edge.type })),
+      workflowId: task.WorkflowID,
+      defaultRole: task.AssignedRole,
+      required: 'Yes',
+      milestone: 'No',
+      gateType: task.GateType,
+      audience: task.Audience,
+      phase: task.Phase,
+      templateVersion: task.TemplateVersion,
+    }));
+    const durationBySequence = Object.fromEntries(definitions.filter((definition) => definition.durationDays).map((definition) => [definition.sequence, Number(definition.durationDays)]));
+    let preview;
+    try {
+      preview = previewTradeOrderOverride(definitions, order, { startDate: project.StartDate, durationBySequence });
+    } catch (error) {
+      return sendMessage(config.leaderToken, message.chat.id, escape(error.message));
+    }
+    if (!confirming) {
+      const edgeLines = preview.changedEdges.map((edge) => `• ${escape(edge.taskName)}`);
+      const forecastLines = preview.forecastDiffs.slice(0, 8).map((diff) => `• ${escape(diff.taskName)}: ${escape(diff.previousForecastStart || 'unset')} → ${escape(diff.forecastStart || 'unset')}`);
+      return sendMessage(config.leaderToken, message.chat.id, `<b>Trade order preview</b>\nShared template: unchanged\nChanged links:\n${edgeLines.join('\n') || 'None'}\n\nForecast changes:\n${forecastLines.join('\n') || 'None — durations are still unconfirmed.'}\n\nReply with <code>/tradeorder confirm ${escape(project.ProjectID)} ${escape(order.join(', '))}</code> to apply this to the project only.`);
+    }
+    const idForSequence = new Map(tasks.map((task) => [String(task.Sequence), task]));
+    for (const definition of preview.definitions) {
+      const task = idForSequence.get(String(definition.sequence));
+      const predecessorIds = definition.predecessors.map((edge) => `${idForSequence.get(String(edge.sequence)).TaskID}:${edge.type}`).join(',');
+      if (task.PredecessorTaskIDs === predecessorIds) continue;
+      await store.updateRow('Tasks', task.rowNumber, { PredecessorTaskIDs: predecessorIds });
+    }
+    for (const diff of preview.forecastDiffs) {
+      const task = idForSequence.get(String(diff.sequence));
+      if (!task || task.ActualStart || ['In Progress', 'Completed', 'On hold'].includes(task.Status)) continue;
+      await store.updateRow('Tasks', task.rowNumber, { ForecastStart: diff.forecastStart, ForecastEnd: diff.forecastEnd });
+    }
+    await store.audit({ projectId: project.ProjectID, action: 'Trade order override', newValue: order.join(', '), actor: message.from.id, actorName: actor(message.from).name, source: 'Telegram founder bot', details: `${preview.changedEdges.length} procurement link(s) changed on this project only` });
+    return sendMessage(config.leaderToken, message.chat.id, `Trade order applied to <b>${escape(project.ProjectName)}</b>. The shared template was not changed.`);
   }
 }
 
@@ -743,8 +872,19 @@ async function leaderCallback(callback) {
   if (!isFounder && !isProjectLead) return answerCallback(config.leaderToken, callback.id, 'Only the founder or project lead can decide.');
   const task = await store.task(approval.TaskID);
   const status = decision === 'approve' ? 'Approved' : 'Rejected';
+  const forecast = decision === 'approve' && task.TemplateVersion
+    ? forecastDelayImpact(await store.tasksForProject(task.ProjectID), task.TaskID, Number(approval.DelayDays))
+    : null;
   await store.updateRow('Approvals', approval.rowNumber, { Status: status, DecidedAt: new Date().toISOString(), DecidedByTelegramID: String(callback.from.id) });
   await store.updateRow('Tasks', task.rowNumber, { Status: decision === 'approve' ? 'Delayed — Approved' : 'Delay Rejected', ApprovalStatus: status, LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(callback.from.id) });
+  if (forecast) {
+    const currentTasks = await store.tasksForProject(task.ProjectID);
+    for (const updated of forecast.tasks) {
+      const current = currentTasks.find((item) => item.TaskID === updated.TaskID);
+      if (!current || (current.ForecastStart === updated.ForecastStart && current.ForecastEnd === updated.ForecastEnd)) continue;
+      await store.updateRow('Tasks', current.rowNumber, { ForecastStart: updated.ForecastStart, ForecastEnd: updated.ForecastEnd });
+    }
+  }
   await store.audit({ projectId: approval.ProjectID, taskId: task.TaskID, action: `Delay ${status.toLowerCase()}`, oldValue: 'Delay Requested', newValue: status, actor: callback.from.id, actorName: actor(callback.from).name, source: 'Telegram leader bot', details: approval.Reason });
   await answerCallback(config.leaderToken, callback.id, `Delay ${status.toLowerCase()}.`);
   await sendMessage(config.leaderToken, callback.message.chat.id, `✅ Delay request <code>${approvalId}</code> ${status.toLowerCase()}.`);
