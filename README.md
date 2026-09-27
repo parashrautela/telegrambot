@@ -201,6 +201,18 @@ Do not run a local bot while Railway is polling the same token. Telegram permits
 
 Railway does not read the local `.env` file.
 
+## Frontend
+
+The React + Vite frontend lives in `frontend/` and uses shadcn/ui with Tailwind CSS v4. Start it with:
+
+```sh
+cd frontend
+npm install
+npm run dev
+```
+
+Or run `npm run frontend` from the repository root. Add more shadcn/ui components from `frontend/` with `npx shadcn@latest add <component>`; generated components go in `src/components/ui/`.
+
 ## Security
 
 - Never commit or share `.env`, bot tokens, OpenAI keys, or Google private keys.

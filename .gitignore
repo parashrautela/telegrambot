@@ -1,3 +1,5 @@
 .env
 .DS_Store
 tuckbox-design/
+frontend/node_modules/
+frontend/dist/
