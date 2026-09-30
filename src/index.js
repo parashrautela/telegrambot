@@ -5,7 +5,8 @@ import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProj
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
 import { applyReviewDecision, completionBlockReason, createDraftRevision, dependencyEdges, forecastDelayImpact, previewTradeOrderOverride, resolveDrawing } from './workflow-engine.js';
-import { answerCallback, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
+import { answerCallback, getChatAdministrators, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
+import { startWebBridge } from './web-bridge.js';
 
 const config = botConfig();
 const store = new SheetStore();
@@ -20,6 +21,53 @@ const founderGroupMessageDrafts = new Map();
 const groupBotProfile = await getMe(config.groupToken);
 const leaderBotProfile = await getMe(config.leaderToken);
 const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
+
+async function syncGroupRoster() {
+  const baseUrl = process.env.WEB_APP_URL?.replace(/\/$/, '');
+  const secret = process.env.INTEGRATION_SHARED_SECRET;
+  if (!baseUrl || !secret) return;
+  const response = await fetch(`${baseUrl}/api/integrations/telegram/groups/snapshot`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` },
+    body: JSON.stringify({ groups: await store.groupSnapshot() }), signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new Error(`Group roster sync failed (${response.status})`);
+}
+
+async function recordGroupMember(chat, member, status) {
+  if (!groupOnly(chat) || !member || member.is_bot) return;
+  await store.registerGroup(chat.id, chat.title || 'Unnamed Telegram group');
+  await store.upsertGroupMember(chat.id, member, status);
+  await syncGroupRoster().catch((error) => console.warn(error.message));
+}
+
+async function discoverGroup(update) {
+  const change = update.my_chat_member;
+  if (change && groupOnly(change.chat) && String(change.new_chat_member?.user?.id) === String(groupBotProfile.id) && joinedStatus.has(change.new_chat_member?.status)) {
+    await store.registerGroup(change.chat.id, change.chat.title || 'Unnamed Telegram group');
+    try {
+      const admins = await getChatAdministrators(config.groupToken, change.chat.id);
+      for (const admin of admins) await store.upsertGroupMember(change.chat.id, admin.user, 'Active');
+    } catch (error) { console.warn('Could not read group administrators:', error.message); }
+    await syncGroupRoster().catch((error) => console.warn(error.message));
+  }
+  const memberChange = update.chat_member;
+  if (memberChange && groupOnly(memberChange.chat)) {
+    const member = memberChange.new_chat_member?.user;
+    const status = memberChange.new_chat_member?.status;
+    if (member && !member.is_bot && (joinedStatus.has(status) || ['left', 'kicked'].includes(status))) {
+      await recordGroupMember(memberChange.chat, member, joinedStatus.has(status) ? 'Active' : 'Left');
+    }
+  }
+  const message = update.message;
+  if (message && groupOnly(message.chat)) {
+    if (message.new_chat_title) {
+      await store.registerGroup(message.chat.id, message.new_chat_title);
+      await syncGroupRoster().catch((error) => console.warn(error.message));
+    }
+    for (const member of message.new_chat_members || []) await recordGroupMember(message.chat, member, 'Active');
+    if (message.left_chat_member) await recordGroupMember(message.chat, message.left_chat_member, 'Left');
+  }
+}
 
 function founderHistory(chatId) {
   return founderConversation.get(String(chatId)) ?? [];
@@ -247,7 +295,8 @@ async function welcomeNewProjectMember(update) {
   await store.createOnboarding({ onboardingId, projectId: project.ProjectID, groupChatId: change.chat.id, telegramId: member.id, telegramName: memberName });
   await store.audit({ projectId: project.ProjectID, action: 'Member joined — pending profile', actor: member.id, actorName: memberName, source: 'Telegram group bot', details: onboardingId });
   const profileLink = `https://t.me/${leaderBotProfile.username}?start=profile_${onboardingId}`;
-  await sendMessage(config.groupToken, change.chat.id, `Welcome <b>${escape(memberName)}</b> 👋\n\nI’m setting up your project profile. Meanwhile, here is where the project stands:\n\n${await projectTldr(project)}\n\nThe founder will confirm your role shortly.`, { inline_keyboard: [[{ text: 'Set up my profile', url: profileLink }]] });
+  await sendMessage(config.groupToken, change.chat.id, `Welcome <b>${escape(memberName)}</b> 👋\n\nI’m setting up your project profile. Meanwhile, here is where the project stands:\n\n${await projectTldr(project)}\n\nThe founder will confirm your role shortly.`, process.env.WEB_APP_URL ? undefined : { inline_keyboard: [[{ text: 'Set up my profile', url: profileLink }]] });
+  if (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET) return;
   return sendMessage(config.leaderToken, config.founderTelegramId, `<b>New project member joined</b>\n\nName: ${escape(memberName)}\nProject: ${escape(project.ProjectName)}\nJoined: ${new Date(change.date * 1000).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nPlease assign their profile and role before they can update project tasks.`, { inline_keyboard: [[{ text: 'Assign role', callback_data: `onboard_role:${onboardingId}` }]] });
 }
 
@@ -342,7 +391,8 @@ async function requireProject(chat, token) {
 }
 
 async function verifyAssigned(task, from, token, chatId) {
-  const knownUser = await store.user(from.id);
+  const groupMember = await store.groupMember(chatId, from.id);
+  const knownUser = groupMember ? (groupMember.MembershipStatus === 'Active' && groupMember.AssignedRole ? groupMember : null) : await store.user(from.id);
   if (!knownUser && String(from.id) !== config.founderTelegramId) {
     await sendMessage(token, chatId, 'You are not registered as an active project user yet. Ask the founder to add your Telegram ID to the Users sheet.');
     return false;
@@ -418,6 +468,15 @@ async function groupCommand(message) {
   const text = message.text?.trim() ?? '';
   const [rawCommand, ...argumentsList] = text.split(/\s+/);
   const command = rawCommand?.split('@')[0];
+  if (groupOnly(message.chat) && (command === '/start' || command === '/join')) {
+    await recordGroupMember(message.chat, message.from, 'Active');
+    if (command === '/join') return sendMessage(config.groupToken, message.chat.id, `Registered <b>${escape(actor(message.from).name)}</b> in this group. The founder can now assign a project name and role in the web app.`);
+  }
+  if (groupOnly(message.chat) && command === '/roster') {
+    const members = (await store.rows('GroupMembers')).filter((item) => String(item.GroupChatID) === String(message.chat.id) && item.MembershipStatus === 'Active');
+    const lines = members.map((member) => `• ${escape(member.AssignedName || member.TelegramName)} — ${escape(member.AssignedRole || 'Role pending')}`);
+    return sendMessage(config.groupToken, message.chat.id, `<b>Project team</b>\n${lines.join('\n') || 'No members recorded yet. Ask members to send /join.'}`);
+  }
   const project = await requireProject(message.chat, config.groupToken);
   if (!project) return;
   const user = actor(message.from);
@@ -893,6 +952,7 @@ async function leaderCallback(callback) {
 }
 
 poll(config.groupToken, 'Project group bot', async (update) => {
+  await discoverGroup(update);
   if (update.message) {
     let request;
     try {
@@ -943,6 +1003,9 @@ poll(config.groupToken, 'Project group bot', async (update) => {
     await welcomeNewProjectMember(update);
   }
 });
+startWebBridge({ store, token: config.groupToken, founderTelegramId: config.founderTelegramId, onClientReady: (project, clientName) => askFounderForPlan({ project, clientName }) });
+setInterval(() => syncGroupRoster().catch((error) => console.warn(error.message)), 60_000);
+syncGroupRoster().catch((error) => console.warn(error.message));
 poll(config.leaderToken, 'Founder bot', async (update) => {
   if (update.message?.text?.startsWith('/')) await leaderCommand(update.message);
   else if (update.message?.text) await leaderNaturalLanguageReply(update.message);

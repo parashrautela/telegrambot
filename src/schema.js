@@ -41,6 +41,7 @@ export const SHEETS = {
     'SubmittedByName', 'ResourceType', 'TelegramFileID', 'FileName', 'Caption', 'SubmittedAt',
   ],
   GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status'],
+  GroupMembers: ['GroupChatID', 'TelegramUserID', 'TelegramName', 'MembershipStatus', 'AssignedName', 'AssignedRole', 'UpdatedAt'],
   Approvals: [
     'ApprovalID', 'ProjectID', 'TaskID', 'RequestType', 'RequestedByTelegramID',
     'RequestedByName', 'Reason', 'DelayDays', 'Status', 'GroupChatID',

@@ -160,7 +160,7 @@ export class SheetStore {
     const groups = await this.rows('GroupRegistry');
     const existing = groups.find((group) => String(group.GroupChatID) === String(groupChatId));
     if (existing) {
-      await this.updateRow('GroupRegistry', existing.rowNumber, { GroupTitle: groupTitle, Status: 'Available' });
+      await this.updateRow('GroupRegistry', existing.rowNumber, { GroupTitle: groupTitle });
       return;
     }
     await this.append('GroupRegistry', { GroupChatID: String(groupChatId), GroupTitle: groupTitle, RegisteredAt: now(), Status: 'Available' });
@@ -174,6 +174,34 @@ export class SheetStore {
   async markGroupLinked(groupChatId) {
     const group = (await this.rows('GroupRegistry')).find((item) => String(item.GroupChatID) === String(groupChatId));
     if (group) await this.updateRow('GroupRegistry', group.rowNumber, { Status: 'Linked' });
+  }
+
+  async upsertGroupMember(groupChatId, member, status) {
+    if (!member || member.is_bot) return;
+    const existing = (await this.rows('GroupMembers')).find((row) => String(row.GroupChatID) === String(groupChatId) && String(row.TelegramUserID) === String(member.id));
+    const changes = { TelegramName: [member.first_name, member.last_name].filter(Boolean).join(' ') || member.username || 'Unknown', MembershipStatus: status, UpdatedAt: now() };
+    if (existing) await this.updateRow('GroupMembers', existing.rowNumber, changes);
+    else await this.append('GroupMembers', { GroupChatID: String(groupChatId), TelegramUserID: String(member.id), ...changes }, { raw: true });
+  }
+
+  async assignGroupRole({ groupChatId, telegramUserId, name, role }) {
+    const existing = (await this.rows('GroupMembers')).find((row) => String(row.GroupChatID) === String(groupChatId) && String(row.TelegramUserID) === String(telegramUserId));
+    if (!existing || existing.MembershipStatus !== 'Active') throw new Error('This member is not active in the group.');
+    const changed = existing.AssignedName !== name || existing.AssignedRole !== role;
+    if (changed) await this.updateRow('GroupMembers', existing.rowNumber, { AssignedName: name, AssignedRole: role, UpdatedAt: now() });
+    const user = await this.user(telegramUserId);
+    if (user) await this.updateRow('Users', user.rowNumber, { Name: name, Role: role, Active: 'Yes' });
+    else await this.append('Users', { TelegramUserID: String(telegramUserId), Name: name, Role: role, Active: 'Yes' }, { raw: true });
+    return changed;
+  }
+
+  async groupSnapshot() {
+    const [groups, members] = await Promise.all([this.rows('GroupRegistry'), this.rows('GroupMembers')]);
+    return groups.map((group) => ({ groupChatId: String(group.GroupChatID), title: group.GroupTitle, status: group.Status, members: members.filter((member) => String(member.GroupChatID) === String(group.GroupChatID)).map((member) => ({ telegramUserId: String(member.TelegramUserID), telegramName: member.TelegramName, membershipStatus: member.MembershipStatus, assignedName: member.AssignedName, assignedRole: member.AssignedRole })) }));
+  }
+
+  async groupMember(groupChatId, telegramUserId) {
+    return (await this.rows('GroupMembers')).find((item) => String(item.GroupChatID) === String(groupChatId) && String(item.TelegramUserID) === String(telegramUserId));
   }
 
   async task(taskId) { return (await this.rows('Tasks')).find((task) => task.TaskID === taskId); }

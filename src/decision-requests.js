@@ -36,8 +36,8 @@ export function parseDecisionRequest(message, botUsername) {
 export async function captureDecisionRequest(store, project, request) {
   const existing = (await store.rows('DecisionRequests')).find((row) => row.RequestID === request.RequestID);
   if (existing) return { request: existing, created: false };
-  const member = await store.user(request.RequestedByTelegramID);
-  const record = { ...request, ProjectID: project.ProjectID, RequestedByRole: member?.Role || 'Unassigned' };
+  const member = await store.groupMember?.(request.GroupChatID, request.RequestedByTelegramID) || await store.user(request.RequestedByTelegramID);
+  const record = { ...request, ProjectID: project.ProjectID, RequestedByRole: member?.AssignedRole || member?.Role || 'Unassigned' };
   await store.append('DecisionRequests', record, { raw: true });
   return { request: record, created: true };
 }

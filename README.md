@@ -37,17 +37,20 @@ Project team ── project group ── Group bot ┘
 
 ### Create a project
 
-1. Create a Telegram group and add the group bot.
-2. Send `/start` in that group to register it.
-3. In the founder bot, write:
+The web app now supports a Telegram-first setup:
+
+1. Create a Telegram group and add the group bot as an administrator.
+2. Add the client and team. The bot records people it sees joining and sends the group roster to the web app. Existing group administrators are discovered when the bot joins; other people who joined earlier can send `/join` in the group.
+3. Open **Group setup** in the founder web app. Assign each person a project name and role. The bot announces each assignment in the Telegram group; it cannot change a person's Telegram profile name.
+4. Assign at least one person the `Client` role, then create the linked project from that screen. The founder bot will ask for a workflow plan before tasks are generated.
+
+The older founder-bot project setup flow remains available. In the founder bot, write:
 
    ```text
    Create a project called Parash ka ghar for Parash, starting 22 September
    ```
 
-4. Answer any missing questions and select the registered group.
-5. Add the client to the Telegram group. When the founder approves their role as `Client`, the founder bot asks which plan to assign.
-6. Choose a plan. Only then are its tasks generated and its linked resources shared in the group.
+Answer any missing questions and select the registered group. When the client role is approved, choose a plan. Only then are its tasks generated and its linked resources shared in the group.
 
 ### Report an update
 
@@ -207,9 +210,15 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL=
 GOOGLE_PRIVATE_KEY=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-5-mini
+WEB_APP_URL=https://your-web-app.example
+INTEGRATION_SHARED_SECRET=use-the-same-long-random-value-in-both-services
+BOT_BRIDGE_PORT=
 ```
 
 Use the numeric ID from `@userinfobot` as `FOUNDER_TELEGRAM_ID`. Keep `\\n` escapes in `GOOGLE_PRIVATE_KEY`.
+Point the web app's `BOT_BRIDGE_URL` to this service's HTTPS origin. On Railway,
+leave `BOT_BRIDGE_PORT` empty so the bridge listens on `PORT`. The two services
+remain separate and communicate through authenticated HTTP endpoints.
 
 ```sh
 npm run setup-sheet
