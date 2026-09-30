@@ -119,10 +119,10 @@ export class SheetStore {
     }));
   }
 
-  async append(sheetName, object) {
+  async append(sheetName, object, { raw = false } = {}) {
     const headers = SHEETS[sheetName];
     const values = headers.map((header) => object[header] ?? '');
-    await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
+    await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=${raw ? 'RAW' : 'USER_ENTERED'}&insertDataOption=INSERT_ROWS`, {
       method: 'POST', body: JSON.stringify({ values: [values] }),
     });
   }

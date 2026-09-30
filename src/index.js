@@ -1,5 +1,6 @@
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
+import { captureDecisionRequest, parseDecisionRequest, syncDecisionRequest } from './decision-requests.js';
 import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
@@ -422,7 +423,7 @@ async function groupCommand(message) {
   const user = actor(message.from);
 
   if (command === '/start') {
-    await sendMessage(config.groupToken, message.chat.id, `Connected to <b>${escape(project.ProjectName)}</b>.\nUse /tasks to see active work.`, null);
+    await sendMessage(config.groupToken, message.chat.id, `Connected to <b>${escape(project.ProjectName)}</b>.\nTelegram group chat ID: <code>${escape(message.chat.id)}</code>\nUse /tasks to see active work.`, null);
     return;
   }
   if (command === '/tasks') {
@@ -892,6 +893,30 @@ async function leaderCallback(callback) {
 }
 
 poll(config.groupToken, 'Project group bot', async (update) => {
+  if (update.message) {
+    let request;
+    try {
+      request = parseDecisionRequest(update.message, groupBotProfile.username);
+    } catch (error) {
+      await sendMessage(config.groupToken, update.message.chat.id, escape(error.message));
+      return;
+    }
+    if (request) {
+      const project = await requireProject(update.message.chat, config.groupToken);
+      if (!project) return;
+      const result = await captureDecisionRequest(store, project, request);
+      let sync;
+      try { sync = await syncDecisionRequest(project, result.request); }
+      catch (error) {
+        console.error(error.message);
+        await sendMessage(config.groupToken, update.message.chat.id, `Saved request <code>${escape(request.RequestID)}</code> in the bot, but the web app has not received it. Retry the same command later.`);
+        return;
+      }
+      await sendMessage(config.groupToken, update.message.chat.id,
+        `${sync.configured ? (result.created ? 'Saved for review' : 'Already tracked') : 'Saved in bot only'} — <b>${escape(project.ProjectName)}</b>\n${escape(result.request.RequestType)} · ${escape(sync.status || result.request.Status)}${sync.configured ? '' : '\nWeb app sync is not configured yet.'}\nReference: <code>${escape(result.request.RequestID)}</code>`);
+      return;
+    }
+  }
   if (update.message) await handleProjectResourceUpload(update.message);
   if (update.message?.text) {
     const mentioned = update.message.text.toLowerCase().includes(groupBotMention);

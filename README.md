@@ -133,9 +133,38 @@ To message a project group, say something like “Ask the Nishank Residence clie
 
 ## Group bot
 
+### Web decision inbox: request capture
+
+Decision requests are stored in the new `DecisionRequests` sheet as an intake
+record; the web app tracks their published and resolved status. When
+`WEB_APP_URL` and `INTEGRATION_SHARED_SECRET` are configured, the bot also sends
+each request to the workflow web app. Set the same shared secret in both
+services, link the Telegram group chat ID to a web project in its founder
+**Needs attention** screen, and set `GROUP_BOT_TOKEN` in the web app to enable
+publishing. If sync fails, repeating the same Telegram command retries it.
+
+- Send `/approval Buy these lights?` or `/question Where should the socket go?`.
+- Alternatively, reply to a message, photo, drawing, document or voice note with
+  `/approval` or `/question`, optionally adding context.
+- Commands can target this bot explicitly, such as `/approval@your_group_bot`.
+- The group must already be linked to an active project. The bot acknowledges
+  the saved pending request with a reference ID.
+- Repeating the same request type on the same original message returns the
+  existing request. Approvals and questions are tracked separately.
+- Original sender, requesting member/role, project, Telegram message IDs and
+  attachment file IDs are retained. Attachment files are not downloaded, and
+  voice notes are not transcribed. Album handling currently captures only the
+  specific message that was marked.
+
+Schema setup creates this tab on the next normal bot startup, or through
+`npm run setup-sheet`. Use `npm run test:requests` for offline request tests.
+Do not start another polling instance while production is running.
+
 | Command or message | Purpose |
 | --- | --- |
 | `/start` | Register a group or confirm its project link. |
+| `/approval [request]` | Capture a pending approval, or mark a replied-to message. |
+| `/question [request]` | Capture a pending question, or mark a replied-to message. |
 | `/tasks` | List active tasks. |
 | `/done TASK_ID` | Mark a permitted task complete. |
 | `/delay TASK_ID DAYS reason` | Request a delay approval. |

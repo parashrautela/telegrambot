@@ -1,6 +1,13 @@
 import { residentialInteriorTuples } from './residential-interior.js';
 
 export const SHEETS = {
+  DecisionRequests: [
+    'RequestID', 'ProjectID', 'GroupChatID', 'SourceMessageID', 'CommandMessageID',
+    'RequestedByTelegramID', 'RequestedByName', 'RequestedByRole',
+    'OriginalSenderTelegramID', 'OriginalSenderName', 'RequestType', 'OriginalMessage',
+    'RequestContext', 'AttachmentsJSON', 'Status', 'CreatedAt',
+    'Response', 'PublishedMessageID', 'PublishedAt', 'ResolvedAt',
+  ],
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
     'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes',
