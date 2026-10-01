@@ -21,6 +21,18 @@ const founderGroupMessageDrafts = new Map();
 const groupBotProfile = await getMe(config.groupToken);
 const leaderBotProfile = await getMe(config.leaderToken);
 const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
+const observedGroups = new Set();
+
+async function observeGroup(chat) {
+  if (!groupOnly(chat) || observedGroups.has(String(chat.id))) return;
+  await store.registerGroup(chat.id, chat.title || 'Unnamed Telegram group');
+  observedGroups.add(String(chat.id));
+  try {
+    const admins = await getChatAdministrators(config.groupToken, chat.id);
+    for (const admin of admins) await store.upsertGroupMember(chat.id, admin.user, 'Active');
+  } catch (error) { console.warn('Could not read group administrators:', error.message); }
+  await syncGroupRoster().catch((error) => console.warn(error.message));
+}
 
 async function syncGroupRoster() {
   const baseUrl = process.env.WEB_APP_URL?.replace(/\/$/, '');
@@ -35,7 +47,7 @@ async function syncGroupRoster() {
 
 async function recordGroupMember(chat, member, status) {
   if (!groupOnly(chat) || !member || member.is_bot) return;
-  await store.registerGroup(chat.id, chat.title || 'Unnamed Telegram group');
+  await observeGroup(chat);
   await store.upsertGroupMember(chat.id, member, status);
   await syncGroupRoster().catch((error) => console.warn(error.message));
 }
@@ -43,12 +55,7 @@ async function recordGroupMember(chat, member, status) {
 async function discoverGroup(update) {
   const change = update.my_chat_member;
   if (change && groupOnly(change.chat) && String(change.new_chat_member?.user?.id) === String(groupBotProfile.id) && joinedStatus.has(change.new_chat_member?.status)) {
-    await store.registerGroup(change.chat.id, change.chat.title || 'Unnamed Telegram group');
-    try {
-      const admins = await getChatAdministrators(config.groupToken, change.chat.id);
-      for (const admin of admins) await store.upsertGroupMember(change.chat.id, admin.user, 'Active');
-    } catch (error) { console.warn('Could not read group administrators:', error.message); }
-    await syncGroupRoster().catch((error) => console.warn(error.message));
+    await observeGroup(change.chat);
   }
   const memberChange = update.chat_member;
   if (memberChange && groupOnly(memberChange.chat)) {
@@ -60,6 +67,7 @@ async function discoverGroup(update) {
   }
   const message = update.message;
   if (message && groupOnly(message.chat)) {
+    await observeGroup(message.chat);
     if (message.new_chat_title) {
       await store.registerGroup(message.chat.id, message.new_chat_title);
       await syncGroupRoster().catch((error) => console.warn(error.message));
