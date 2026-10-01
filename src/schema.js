@@ -1,6 +1,13 @@
 import { residentialInteriorTuples } from './residential-interior.js';
 
 export const SHEETS = {
+  DecisionRequests: [
+    'RequestID', 'ProjectID', 'GroupChatID', 'SourceMessageID', 'CommandMessageID',
+    'RequestedByTelegramID', 'RequestedByName', 'RequestedByRole',
+    'OriginalSenderTelegramID', 'OriginalSenderName', 'RequestType', 'OriginalMessage',
+    'RequestContext', 'AttachmentsJSON', 'Status', 'CreatedAt',
+    'Response', 'PublishedMessageID', 'PublishedAt', 'ResolvedAt',
+  ],
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
     'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes',
@@ -34,6 +41,7 @@ export const SHEETS = {
     'SubmittedByName', 'ResourceType', 'TelegramFileID', 'FileName', 'Caption', 'SubmittedAt',
   ],
   GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status'],
+  GroupMembers: ['GroupChatID', 'TelegramUserID', 'TelegramName', 'MembershipStatus', 'AssignedName', 'AssignedRole', 'UpdatedAt'],
   Approvals: [
     'ApprovalID', 'ProjectID', 'TaskID', 'RequestType', 'RequestedByTelegramID',
     'RequestedByName', 'Reason', 'DelayDays', 'Status', 'GroupChatID',

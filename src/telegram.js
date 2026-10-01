@@ -17,9 +17,10 @@ export const sendDocument = (token, chatId, document, caption = '') => api(token
   chat_id: chatId, document, ...(caption ? { caption, parse_mode: 'HTML' } : {}),
 });
 export const answerCallback = (token, callbackId, text = '') => api(token, 'answerCallbackQuery', { callback_query_id: callbackId, text });
-export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query', 'chat_member'] });
+export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'] });
 export const getMe = (token) => api(token, 'getMe');
 export const getChatMember = (token, chatId, userId) => api(token, 'getChatMember', { chat_id: chatId, user_id: userId });
+export const getChatAdministrators = (token, chatId) => api(token, 'getChatAdministrators', { chat_id: chatId });
 
 export async function poll(token, label, onUpdate) {
   let offset = 0;
