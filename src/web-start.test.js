@@ -1,0 +1,30 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {startWebBridge} from './web-bridge.js';
+
+test('web starts the canonical plan, announces once, blocks incomplete members and concurrent retries',async(t)=>{
+  const prior={...process.env}, original=fetch;
+  process.env.INTEGRATION_SHARED_SECRET='test-secret';process.env.BOT_BRIDGE_PORT='0';
+  const project={ProjectID:'P001',ProjectName:'Test home',GroupChatID:'-123',ClientName:'Maya',StartDate:'2026-10-07',rowNumber:2};
+  const members=[{GroupChatID:'-123',TelegramUserID:'42',MembershipStatus:'Active',AssignedName:'Maya',AssignedRole:'Client'},{GroupChatID:'-123',TelegramUserID:'43',MembershipStatus:'Active',AssignedName:'Neha',AssignedRole:''}];
+  const data={GroupMembers:members,MemberOnboarding:[],Tasks:[],WorkflowTemplates:[10,20].map(Sequence=>({WorkflowID:'RESTORATION-V1',Sequence,Stage:'Resources',TaskName:`Task ${Sequence}`,DefaultRole:'Designer',DurationDays:1}))};
+  let release,holding=false,sends=0,personalCalls=0;
+  const store={rows:async(name)=>data[name]||[],projectForGroup:async()=>project,tasksForProject:async()=>data.Tasks,updateRow:async(name,row,changes)=>Object.assign(project,changes),audit:async()=>{},append:async(name,row)=>{if(holding){holding=false;await new Promise(resolve=>release=resolve);}data[name].push(row);}};
+  globalThis.fetch=async(url)=>{assert.ok(String(url).endsWith('/sendMessage'));sends++;return Response.json({ok:true,result:{message_id:99}});};
+  const server=startWebBridge({store,token:'fake',founderTelegramId:'1',onClientReady:()=>personalCalls++});
+  await new Promise(resolve=>server.once('listening',resolve));
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));globalThis.fetch=original;for(const k of ['INTEGRATION_SHARED_SECRET','BOT_BRIDGE_PORT'])if(prior[k]===undefined)delete process.env[k];else process.env[k]=prior[k];});
+  const post=async(input,secret=true)=>{const r=await original(`http://localhost:${server.address().port}/api/integrations/web/projects/start`,{method:'POST',headers:{'content-type':'application/json',...(secret?{authorization:'Bearer test-secret'}:{})},body:JSON.stringify({groupChatId:'-123',workflowId:'RESTORATION-V1',startDate:'2026-10-07',...input})});return {status:r.status,data:await r.json()};};
+  assert.equal((await post({},false)).status,401);
+  assert.equal((await post({})).status,409);assert.equal(data.Tasks.length,0);
+  members[1].AssignedRole='Designer';assert.equal((await post({startDate:'2026-99-99'})).status,400);
+  holding=true;const first=post({});while(!release)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal((await post({})).status,409);release();
+  const started=await first;assert.equal(started.status,200);assert.equal(started.data.tasks.length,2);assert.equal(started.data.workflowName,'Restoration');assert.equal(project.ClientTelegramID,'42');assert.equal(project.WebManaged,'Yes');
+  assert.equal((await post({})).status,200);assert.equal(data.Tasks.length,2);assert.equal(sends,1);assert.equal(personalCalls,0);
+  assert.equal((await post({workflowId:'PAINTING-V1'})).status,409);
+  project.WorkflowAnnouncementStatus='';globalThis.fetch=async()=>{sends++;throw new Error('mock uncertain delivery');};
+  assert.equal((await post({})).data.announcementStatus,'Unknown');
+  assert.equal((await post({})).data.announcementStatus,'Unknown');assert.equal(sends,2);
+  data.Tasks.pop();assert.equal((await post({})).status,409);assert.equal(sends,2);
+});

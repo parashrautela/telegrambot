@@ -11,7 +11,7 @@ export const SHEETS = {
   ],
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
-    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes', 'ClientTelegramID',
+    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes', 'ClientTelegramID', 'WebManaged', 'WorkflowAnnouncementStatus',
   ],
   WorkflowTemplates: [
     'WorkflowID', 'Sequence', 'Stage', 'TaskName', 'DurationDays',
@@ -39,7 +39,7 @@ export const SHEETS = {
   ],
   SubmittedResources: [
     'SubmissionID', 'ProjectID', 'TaskID', 'GroupChatID', 'TelegramUserID',
-    'SubmittedByName', 'ResourceType', 'TelegramFileID', 'FileName', 'Caption', 'SubmittedAt',
+    'SubmittedByName', 'ResourceType', 'TelegramFileID', 'FileName', 'Caption', 'SubmittedAt', 'SourceMessageID', 'MimeType', 'WebSyncStatus', 'WebSyncedAt', 'DriveStatus', 'DriveFileID', 'DriveUrl', 'DriveError',
   ],
   GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status'],
   GroupMembers: ['GroupChatID', 'TelegramUserID', 'TelegramName', 'MembershipStatus', 'AssignedName', 'AssignedRole', 'UpdatedAt'],
