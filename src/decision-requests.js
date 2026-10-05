@@ -49,10 +49,53 @@ export async function syncDecisionRequest(project, request) {
   const response = await fetch(`${baseUrl}/api/integrations/telegram/requests`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${secret}` },
-    body: JSON.stringify({ ...request, TelegramProjectID: project.ProjectID }),
+    body: JSON.stringify({ ...request, TelegramProjectID: project.ProjectID, AutomaticClientQuery: request.AutomaticClientQuery === 'Yes' || request.AutomaticClientQuery === true }),
     signal: AbortSignal.timeout(10_000),
   });
   if (!response.ok) throw new Error(`Web app request sync failed (${response.status})`);
   const result = await response.json();
   return { configured: true, status: result.request?.status || request.Status };
+}
+
+// Capture ordinary text/media only from the workflow's explicitly assigned client.
+export function parseClientRequest(message, project, botUsername) {
+  if (!project?.ClientTelegramID || String(message.from?.id || '') !== String(project.ClientTelegramID) || message.from?.is_bot || !['group','supergroup'].includes(message.chat?.type)) return null;
+  if (String(message.chat.id) !== String(project.GroupChatID)) return null;
+  if ((message.text || message.caption || '').trim().startsWith('/')) return null;
+  if (!(message.text || message.caption || message.photo || message.document || message.video || message.voice || message.audio)) return null;
+  return { ...parseDecisionRequest({ ...message, text: '/question', reply_to_message: message }, botUsername), AutomaticClientQuery: 'Yes' };
+}
+
+const syncing = new Set();
+export async function syncCapturedDecisionRequest(store, project, request) {
+  if (syncing.has(request.RequestID)) return { configured: true, status: request.Status };
+  syncing.add(request.RequestID);
+  try {
+    const result = await syncDecisionRequest(project, request);
+    if (result.configured) {
+      const row = (await store.rows('DecisionRequests')).find((r) => r.RequestID === request.RequestID);
+      if (row) await store.updateRow('DecisionRequests', row.rowNumber, { WebSyncStatus: 'Synced', WebSyncedAt: new Date().toISOString() });
+    }
+    return result;
+  } finally { syncing.delete(request.RequestID); }
+}
+
+let retrying = false;
+let retryCursor = 0;
+export async function retryDecisionRequestSync(store) {
+  if (retrying || !process.env.WEB_APP_URL || !process.env.INTEGRATION_SHARED_SECRET) return;
+  retrying = true;
+  try {
+    const projects = await store.rows('Projects');
+    const requests = (await store.rows('DecisionRequests')).filter((r) => r.WebSyncStatus !== 'Synced');
+    const start = requests.length ? retryCursor % requests.length : 0;
+    const batch = [...requests.slice(start), ...requests.slice(0,start)].slice(0,20);
+    retryCursor = start + batch.length;
+    for (const request of batch) {
+      const project = projects.find((p) => p.ProjectID === request.ProjectID && String(p.GroupChatID) === String(request.GroupChatID));
+      if (!project) continue;
+      try { await syncCapturedDecisionRequest(store, project, request); }
+      catch { console.warn(`Web request sync pending: ${request.RequestID}`); }
+    }
+  } finally { retrying = false; }
 }

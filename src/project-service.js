@@ -12,6 +12,7 @@ function validStartDate(startDateText) {
 
 export async function createProjectShell({ store, projectId, projectName, clientName, startDateText, groupChatId, leaderTelegramId = '' }) {
   if (!/^[A-Za-z0-9_-]+$/.test(projectId)) throw new Error('Project ID can contain only letters, numbers, hyphens, and underscores.');
+  if (!String(clientName || '').trim()) throw new Error('Assign a client before creating a project.');
   const startDate = validStartDate(startDateText);
   const projects = await store.rows('Projects');
   if (projects.some((project) => project.ProjectID === projectId)) throw new Error(`Project ${projectId} already exists.`);
@@ -36,6 +37,21 @@ export async function createProjectShell({ store, projectId, projectName, client
 }
 
 export async function assignWorkflowToProject({ store, project, workflowId, clientName = '', actorTelegramId = '', replaceUntouchedLegacyPlan = false }) {
+  // This guard is shared by web, bot callbacks, and the compatibility/demo helper.
+  // A client name alone is not proof that a client has been assigned.
+  const [groupMembers, onboardings] = await Promise.all([store.rows('GroupMembers'), store.rows('MemberOnboarding')]);
+  const candidates = groupMembers.filter((member) => String(member.GroupChatID) === String(project.GroupChatID)
+    && member.MembershipStatus === 'Active' && /\bclient\b/i.test(member.AssignedRole || ''))
+    .map((member) => ({ telegramId: String(member.TelegramUserID), name: member.AssignedName }));
+  for (const member of onboardings.filter((member) => member.ProjectID === project.ProjectID && member.Status === 'Approved' && /\bclient\b/i.test(member.AssignedRole || ''))) {
+    const roster = groupMembers.find((row) => String(row.GroupChatID) === String(project.GroupChatID) && String(row.TelegramUserID) === String(member.TelegramUserID));
+    if (roster && roster.MembershipStatus !== 'Active') continue;
+    if (!candidates.some((row) => row.telegramId === String(member.TelegramUserID))) candidates.push({ telegramId: String(member.TelegramUserID), name: member.AssignedName });
+  }
+  const assignedClient = project.ClientTelegramID
+    ? candidates.find((member) => member.telegramId === String(project.ClientTelegramID))
+    : candidates.find((member) => member.name?.trim().toLowerCase() === String(clientName || project.ClientName || '').trim().toLowerCase()) || (candidates.length === 1 ? candidates[0] : null);
+  if (!assignedClient) throw new Error('An active, approved client must be assigned before selecting a workflow.');
   const existingTasks = await store.tasksForProject(project.ProjectID);
   if (existingTasks.length && !replaceUntouchedLegacyPlan) throw new Error('This project already has a workflow assigned.');
   if (replaceUntouchedLegacyPlan && existingTasks.some((task) => task.WorkflowID !== 'HOUSE-V1' || task.Status !== 'Pending')) {
@@ -94,7 +110,8 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
     }
   }
   await store.updateRow('Projects', project.rowNumber, {
-    ClientName: clientName || project.ClientName,
+    ClientName: assignedClient.name || clientName || project.ClientName,
+    ClientTelegramID: assignedClient.telegramId,
     Status: 'Active',
     TargetEndDate: scheduledTargetEnd,
     Notes: `Workflow ${workflowId} assigned after client onboarding${replaceUntouchedLegacyPlan ? '; untouched legacy HOUSE-V1 tasks archived.' : ''}`,

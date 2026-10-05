@@ -1,6 +1,6 @@
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
-import { captureDecisionRequest, parseDecisionRequest, syncDecisionRequest } from './decision-requests.js';
+import { captureDecisionRequest, parseDecisionRequest, parseClientRequest, syncCapturedDecisionRequest, retryDecisionRequestSync } from './decision-requests.js';
 import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
@@ -974,7 +974,7 @@ poll(config.groupToken, 'Project group bot', async (update) => {
       if (!project) return;
       const result = await captureDecisionRequest(store, project, request);
       let sync;
-      try { sync = await syncDecisionRequest(project, result.request); }
+      try { sync = await syncCapturedDecisionRequest(store, project, result.request); }
       catch (error) {
         console.error(error.message);
         await sendMessage(config.groupToken, update.message.chat.id, `Saved request <code>${escape(request.RequestID)}</code> in the bot, but the web app has not received it. Retry the same command later.`);
@@ -983,6 +983,17 @@ poll(config.groupToken, 'Project group bot', async (update) => {
       await sendMessage(config.groupToken, update.message.chat.id,
         `${sync.configured ? (result.created ? 'Saved for review' : 'Already tracked') : 'Saved in bot only'} — <b>${escape(project.ProjectName)}</b>\n${escape(result.request.RequestType)} · ${escape(sync.status || result.request.Status)}${sync.configured ? '' : '\nWeb app sync is not configured yet.'}\nReference: <code>${escape(result.request.RequestID)}</code>`);
       return;
+    }
+  }
+  if (update.message && groupOnly(update.message.chat)) {
+    const project = await store.projectForGroup(String(update.message.chat.id));
+    if (project && !['Completed','Abandoned'].includes(project.Status)) {
+      const request = parseClientRequest(update.message, project, groupBotProfile.username);
+      if (request) {
+        const result = await captureDecisionRequest(store, project, request);
+        try { await syncCapturedDecisionRequest(store, project, result.request); }
+        catch { console.warn(`Client query saved; web sync pending: ${request.RequestID}`); }
+      }
     }
   }
   if (update.message) await handleProjectResourceUpload(update.message);
@@ -1014,6 +1025,8 @@ poll(config.groupToken, 'Project group bot', async (update) => {
 startWebBridge({ store, token: config.groupToken, founderTelegramId: config.founderTelegramId, onClientReady: (project, clientName) => askFounderForPlan({ project, clientName }) });
 setInterval(() => syncGroupRoster().catch((error) => console.warn(error.message)), 60_000);
 syncGroupRoster().catch((error) => console.warn(error.message));
+setInterval(() => retryDecisionRequestSync(store).catch(() => console.warn('Request sync retry failed; will retry next minute.')), 60_000);
+retryDecisionRequestSync(store).catch(() => console.warn('Request sync retry failed; will retry next minute.'));
 poll(config.leaderToken, 'Founder bot', async (update) => {
   if (update.message?.text?.startsWith('/')) await leaderCommand(update.message);
   else if (update.message?.text) await leaderNaturalLanguageReply(update.message);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureDecisionRequest, parseDecisionRequest } from './decision-requests.js';
+import { captureDecisionRequest, parseDecisionRequest, parseClientRequest, retryDecisionRequestSync } from './decision-requests.js';
 
 const message = { chat: { id: -123, type: 'supergroup' }, message_id: 10, date: 1700000000, from: { id: 1, first_name: 'Lead' }, text: '/approval Buy these lights?' };
 test('direct request and bot targeting', () => {
@@ -42,4 +42,34 @@ test('capture persists raw content, project and role, and deduplicates repeated 
   assert.equal(records[0].ProjectID, 'P001');
   assert.equal(records[0].RequestedByRole, 'Designer');
   assert.equal(records[0].OriginalMessage, '=1+1');
+});
+
+test('assigned client ordinary text and photo become queries without capturing staff or commands', () => {
+  const project = { ProjectID: 'P001', GroupChatID: '-123', ClientTelegramID: '42' };
+  const clientMessage = { ...message, from: { id: 42, first_name: 'Maya' }, text: 'Can we move the light?' };
+  const request = parseClientRequest(clientMessage, project, 'our_bot');
+  assert.equal(request.OriginalMessage, clientMessage.text);
+  assert.equal(request.AutomaticClientQuery, 'Yes');
+  assert.equal(request.RequestID, 'REQ--123-10-question');
+  assert.equal(parseClientRequest(message,project,'our_bot'),null);
+  assert.equal(parseClientRequest({...clientMessage,text:'/tasks'},project,'our_bot'),null);
+  assert.equal(parseClientRequest(clientMessage,{...project,GroupChatID:'-456'},'our_bot'),null);
+  assert.equal(parseClientRequest({...clientMessage,from:{id:42,is_bot:true}},project,'our_bot'),null);
+  assert.equal(parseClientRequest(clientMessage,{...project,ClientTelegramID:''},'our_bot'),null);
+  const photo = parseClientRequest({...clientMessage,text:undefined,photo:[{file_id:'small'},{file_id:'large'}]},project,'our_bot');
+  assert.equal(JSON.parse(photo.AttachmentsJSON)[0].fileId,'large');
+});
+
+test('persisted request sync retries failures and stops after acknowledged delivery', async (t) => {
+  const previous = { url: process.env.WEB_APP_URL, secret: process.env.INTEGRATION_SHARED_SECRET, fetch: globalThis.fetch };
+  process.env.WEB_APP_URL = 'https://workspace.test'; process.env.INTEGRATION_SHARED_SECRET = 'test-secret';
+  t.after(() => { if (previous.url === undefined) delete process.env.WEB_APP_URL; else process.env.WEB_APP_URL=previous.url; if (previous.secret === undefined) delete process.env.INTEGRATION_SHARED_SECRET; else process.env.INTEGRATION_SHARED_SECRET=previous.secret; globalThis.fetch=previous.fetch; });
+  const project = {ProjectID:'P001',GroupChatID:'-123'};
+  const row = {...parseDecisionRequest(message,'our_bot'),ProjectID:'P001',rowNumber:2,AutomaticClientQuery:'Yes'};
+  const store = { rows:async(sheet)=>sheet==='Projects'?[project]:[row], updateRow:async(sheet,number,input)=>{assert.equal(number,2);Object.assign(row,input);} };
+  let count=0;
+  globalThis.fetch=async(url,options)=>{count++;assert.equal(JSON.parse(options.body).AutomaticClientQuery,true);if(count===1)throw new Error('offline');return Response.json({request:{status:'Pending'}});};
+  await retryDecisionRequestSync(store); assert.equal(row.WebSyncStatus,undefined);
+  await retryDecisionRequestSync(store); assert.equal(row.WebSyncStatus,'Synced'); assert.ok(row.WebSyncedAt);
+  await retryDecisionRequestSync(store); assert.equal(count,2);
 });

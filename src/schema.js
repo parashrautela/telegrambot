@@ -7,10 +7,11 @@ export const SHEETS = {
     'OriginalSenderTelegramID', 'OriginalSenderName', 'RequestType', 'OriginalMessage',
     'RequestContext', 'AttachmentsJSON', 'Status', 'CreatedAt',
     'Response', 'PublishedMessageID', 'PublishedAt', 'ResolvedAt',
+    'AutomaticClientQuery', 'WebSyncStatus', 'WebSyncedAt',
   ],
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
-    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes',
+    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes', 'ClientTelegramID',
   ],
   WorkflowTemplates: [
     'WorkflowID', 'Sequence', 'Stage', 'TaskName', 'DurationDays',
