@@ -18,18 +18,21 @@ test('web bridge assigns a group role and creates a linked project shell', async
   const groups = [{ GroupChatID: '-456', GroupTitle: 'Site Group', Status: 'Available', rowNumber: 2 }];
   const members = [{ GroupChatID: '-456', TelegramUserID: '123', TelegramName: 'Asha', MembershipStatus: 'Active', AssignedName: '', AssignedRole: '', rowNumber: 2 }];
   const projects = [];
+  const requests=[{RequestID:'req',GroupChatID:'-456',SourceMessageID:'10',AttachmentsJSON:JSON.stringify([{type:'Photo',fileId:'photo'}]),rowNumber:2}];
   const store = {
     groupSnapshot: async()=>[{groupChatId:'-456',title:'Site Group',status:'Available',members:[]}],
-    rows: async (sheet) => ({ GroupRegistry: groups, GroupMembers: members, Projects: projects }[sheet] || []),
+    rows: async (sheet) => ({ GroupRegistry: groups, GroupMembers: members, Projects: projects, DecisionRequests:requests }[sheet] || []),
     assignGroupRole: async ({ name, role }) => { members[0].AssignedName = name; members[0].AssignedRole = role; return true; },
     projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id),
     onboardingForMember: async () => null,
     append: async (sheet, row) => { if (sheet === 'Projects') projects.push({ ...row, rowNumber: 2 }); },
-    updateRow: async (sheet, number, changes) => Object.assign(projects.find((row)=>row.rowNumber===number),changes),
+    updateRow: async (sheet, number, changes) => Object.assign((sheet==='DecisionRequests'?requests:projects).find((row)=>row.rowNumber===number),changes),
     audit: async () => {}, markGroupLinked: async () => {},
   };
   const sent = [];
   globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith('/getFile')) return Response.json({ok:true,result:{file_path:'photos/a.jpg'}});
+    if(String(url).includes('/file/bot')) return new Response('PHOTO');
     if (String(url).endsWith('/getChatMember')) return Response.json({ ok: true, result: { status: 'member', user: { first_name: 'Asha' } } });
     if (String(url).endsWith('/sendMessage')) { sent.push(JSON.parse(options.body)); return Response.json({ ok: true, result: { message_id: 1 } }); }
     throw new Error(`Unexpected URL: ${url}`);
@@ -44,6 +47,19 @@ test('web bridge assigns a group role and creates a linked project shell', async
     await new Promise((resolve) => server.once('listening', resolve));
     assert.equal((await post('/api/integrations/web/groups',{},false)).status,401);
     assert.equal((await post('/api/integrations/web/groups',{})).body.groups[0].groupChatId,'-456');
+    const content='/api/integrations/web/decisions/content',publish='/api/integrations/web/decisions/publish';
+    const query={requestId:'req',groupChatId:'-456',attachmentIndex:0};
+    assert.equal((await post(content,query,false)).status,401);
+    assert.equal((await post(content,{...query,groupChatId:'-999'})).status,404);
+    assert.equal((await post(content,{...query,attachmentIndex:1})).status,404);
+    assert.equal(Buffer.from((await post(content,query)).body.bytes,'base64').toString(),'PHOTO');
+    const reply={requestId:'req',groupChatId:'-456',response:'Hello <literal>'};
+    assert.equal((await post(publish,reply)).body.result.message_id,1);
+    assert.equal(sent[0].text,'Hello <literal>');assert.equal(sent[0].parse_mode,undefined);assert.equal(sent[0].reply_parameters.message_id,10);
+    assert.equal((await post(publish,reply)).status,200);assert.equal(sent.length,1);
+    assert.equal((await post(publish,{...reply,response:'Different'})).status,409);
+    requests[0].PublishedMessageID='';requests[0].ReplyDeliveryStatus='Unknown';
+    assert.equal((await post(publish,reply)).status,409);assert.equal(sent.length,1);sent.length=0;
     const role = { groupChatId: '-456', telegramUserId: '123', name: 'Asha Kumar', role: 'Client' };
     assert.equal((await post('/api/integrations/web/group-members', role, false)).status, 401);
     assert.equal((await post('/api/integrations/web/group-members', role)).status, 200);

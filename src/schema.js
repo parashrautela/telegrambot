@@ -7,7 +7,7 @@ export const SHEETS = {
     'OriginalSenderTelegramID', 'OriginalSenderName', 'RequestType', 'OriginalMessage',
     'RequestContext', 'AttachmentsJSON', 'Status', 'CreatedAt',
     'Response', 'PublishedMessageID', 'PublishedAt', 'ResolvedAt',
-    'AutomaticClientQuery', 'WebSyncStatus', 'WebSyncedAt',
+    'AutomaticClientQuery', 'WebSyncStatus', 'WebSyncedAt', 'ReplyDeliveryStatus',
   ],
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
