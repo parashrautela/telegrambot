@@ -1,3 +1,4 @@
+import {migrateTelegramGroup} from './group-migration.js';
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
 import { captureDecisionRequest, parseDecisionRequest, parseClientRequest, syncCapturedDecisionRequest, retryDecisionRequestSync } from './decision-requests.js';
@@ -55,6 +56,15 @@ async function recordGroupMember(chat, member, status) {
 }
 
 async function discoverGroup(update) {
+  const migration=update.message;
+  if(migration?.migrate_to_chat_id || migration?.migrate_from_chat_id) {
+    const from=migration.migrate_from_chat_id || migration.chat.id;
+    const to=migration.migrate_to_chat_id || migration.chat.id;
+    await migrateTelegramGroup(store,from,to,migration.chat.title);
+    observedGroups.add(String(from));observedGroups.delete(String(to));
+    await observeGroup({id:to,type:'supergroup',title:migration.chat.title});
+    await syncGroupRoster();return;
+  }
   const change = update.my_chat_member;
   if (change && groupOnly(change.chat) && String(change.new_chat_member?.user?.id) === String(groupBotProfile.id) && joinedStatus.has(change.new_chat_member?.status)) {
     await observeGroup(change.chat);
