@@ -140,6 +140,21 @@ export class SheetStore {
     });
   }
 
+  async appendRows(sheetName, rows) {
+    if(!rows.length)return;
+    const values=rows.map(row=>SHEETS[sheetName].map(header=>row[header]??''));
+    await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,{method:'POST',body:JSON.stringify({values})});
+  }
+
+  async updateRows(sheetName, rows) {
+    const headers=SHEETS[sheetName];const data=[];
+    for(const row of rows)for(const [field,value] of Object.entries(row.changes)){
+      const column=headers.indexOf(field);if(column<0)throw new Error(`Unknown ${sheetName} field: ${field}`);
+      data.push({range:`${sheetName}!${columnLetter(column)}${row.rowNumber}`,values:[[value]]});
+    }
+    if(data.length)await this.request('/values:batchUpdate',{method:'POST',body:JSON.stringify({valueInputOption:'RAW',data})});
+  }
+
   async audit({ projectId, taskId = '', action, oldValue = '', newValue = '', actor, actorName, source, details = '' }) {
     await this.append('AuditLog', {
       AuditID: id('AUD'), OccurredAt: now(), ProjectID: projectId, TaskID: taskId,
@@ -229,11 +244,11 @@ export class SheetStore {
       .sort((left, right) => Number(left.SortOrder || 0) - Number(right.SortOrder || 0));
   }
 
-  async saveSubmittedResource({ projectId, taskId, groupChatId, user, resourceType, fileId, fileName, caption, sourceMessageId, mimeType }) {
+  async saveSubmittedResource({ projectId, taskId, groupChatId, user, resourceType, fileId, fileName, caption, sourceMessageId, mimeType, revision = '' }) {
     const submissionId = `RES-${groupChatId}-${sourceMessageId}`;
     const existing = (await this.rows('SubmittedResources')).find((row)=>row.SubmissionID===submissionId);
     if (existing) return {record:existing,created:false};
-    const record = {SubmissionID:submissionId, ProjectID:projectId,TaskID:taskId || '',GroupChatID:String(groupChatId),TelegramUserID:String(user.id),SubmittedByName:user.name,ResourceType:resourceType,TelegramFileID:fileId,FileName:fileName,Caption:caption,SubmittedAt:now(),SourceMessageID:String(sourceMessageId),MimeType:mimeType || '',DriveStatus:'Pending',WebSyncStatus:''};
+    const record = {SubmissionID:submissionId, ProjectID:projectId,TaskID:taskId || '',GroupChatID:String(groupChatId),TelegramUserID:String(user.id),SubmittedByName:user.name,ResourceType:resourceType,TelegramFileID:fileId,FileName:fileName,Caption:caption,SubmittedAt:now(),SourceMessageID:String(sourceMessageId),MimeType:mimeType || '',DriveStatus:'Pending',WebSyncStatus:'',Revision:String(revision)};
     await this.append('SubmittedResources',record,{raw:true});
     return {record,created:true};
   }

@@ -1,3 +1,4 @@
+import {startStageWorkflow,actOnStageTask,dispatchStageHandoffs} from './stage-service.js';
 import http from 'node:http';
 import { loadTelegramAttachment } from './telegram-media.js';
 import { timingSafeEqual } from 'node:crypto';
@@ -27,6 +28,24 @@ export function startWebBridge({ store, token, founderTelegramId }) {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
       if (!equal((req.headers.authorization || '').replace(/^Bearer /i, ''), secret)) return respond(res, 401, { error: 'Integration authentication required.' });
+      if(req.method==='POST' && ['/api/integrations/web/stages/start','/api/integrations/web/stages/action','/api/integrations/web/stages/context'].includes(req.url)){
+        const input=await readBody(req);const project=await store.projectForGroup(String(input.groupChatId||''));
+        if(!project)return respond(res,404,{error:'Linked project not found.'});
+        if(req.url.endsWith('/context')){
+          const projectTasks=await store.tasksForProject(project.ProjectID);
+          const task=projectTasks.find(t=>t.TaskID===input.taskId && t.WorkflowID==='STAGE-SIX-V1');
+          if(!task)return respond(res,404,{error:'Linked task not found.'});
+          const drawing=projectTasks.find(t=>t.StageID===task.StageID && t.StepKey==='drawing');
+          const ids=new Set([task.TaskID,drawing?.TaskID,...String(task.PredecessorTaskIDs||'').split(',').filter(Boolean).map(edge=>edge.split(':')[0])]);
+          return respond(res,200,{updates:(await store.rows('TaskUpdates')).filter(row=>row.ProjectID===project.ProjectID && ids.has(row.TaskID)),files:(await store.rows('SubmittedResources')).filter(row=>row.ProjectID===project.ProjectID && ids.has(row.TaskID) && (row.TaskID!==drawing?.TaskID || row.Revision===drawing.DrawingRevision || task.TaskID===drawing?.TaskID)).map(({TelegramFileID,DriveFileID,...row})=>row)});
+        }
+        let result;
+        try{result=req.url.endsWith('/start')?await startStageWorkflow(store,project,input.config):await actOnStageTask(store,project,input.taskId,input.action,{actorId:input.actorId,reason:input.reason});}
+        catch(error){return respond(res,409,{error:error.message});}
+        // Durable task state is acknowledged even if a notification is pending.
+        dispatchStageHandoffs(store,project,token).catch(()=>console.warn('Stage handoff pending.'));
+        return respond(res,200,result);
+      }
       if(req.method==='POST' && req.url==='/api/integrations/web/tasks/sync') {
         const input=await readBody(req);const project=await store.projectForGroup(String(input.groupChatId || ''));
         if(!project || project.WebManaged!=='Yes')return respond(res,404,{error:'Web-managed project not found.'});
@@ -42,6 +61,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           if(typeof item.taskId!=='string' || !/^[A-Za-z0-9_.-]{1,160}$/.test(item.taskId) || typeof item.title!=='string' || !item.title.trim() || item.title.length>200 || typeof item.stage!=='string' || item.stage.length>120 || !['Pending','In Progress','Issue Reported','Completed','Archived'].includes(item.status) || typeof item.deadline!=='string' || (item.deadline && (!/^\d{4}-\d{2}-\d{2}$/.test(item.deadline) || !Number.isFinite(Date.parse(item.deadline)) || new Date(item.deadline).toISOString().slice(0,10)!==item.deadline)))return respond(res,400,{error:'Invalid task fields.'});
           if(seen.has(item.taskId))return respond(res,400,{error:'Duplicate task update.'});seen.add(item.taskId);
           const existing=all.find(task=>task.TaskID===item.taskId);
+          if(existing?.WorkflowID==='STAGE-SIX-V1')return respond(res,409,{error:'Use the linked workflow action to change this task.'});
           if(existing && existing.ProjectID!==project.ProjectID)return respond(res,409,{error:'Task belongs to another project.'});
           if(!existing && !/^WEB-[0-9a-f-]{36}$/.test(item.taskId))return respond(res,404,{error:'Workflow task not found.'});
           const assignee=item.assigneeTelegramId==='founder'?String(project.LeaderTelegramID || founderTelegramId):String(item.assigneeTelegramId || '');

@@ -1,3 +1,5 @@
+import {actOnStageTask,dispatchStageHandoffs} from './stage-service.js';
+import {captureStageReply} from './stage-messages.js';
 import {migrateTelegramGroup} from './group-migration.js';
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
@@ -102,7 +104,7 @@ async function founderProjectContext() {
   const projects = await store.rows('Projects');
   return Promise.all(projects.slice(-12).map(async (project) => {
     const tasks = await store.tasksForProject(project.ProjectID);
-    const current = tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
+    const current = tasks.find(task=>task.WorkflowID==='STAGE-SIX-V1' && ['Ready','In Progress'].includes(task.Status)) || tasks.find(task=>task.WorkflowID==='STAGE-SIX-V1' && task.Status==='On hold') || tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
     return {
       id: project.ProjectID,
       name: project.ProjectName,
@@ -180,7 +182,7 @@ async function nextProjectId() {
 async function projectTldr(project) {
   const tasks = (await store.tasksForProject(project.ProjectID)).filter(task=>!String(task.Status).startsWith('Archived')).sort((left, right) => Number(left.Sequence) - Number(right.Sequence));
   const completed = tasks.filter((task) => task.Status === 'Completed').length;
-  const current = tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
+  const current = tasks.find(task=>task.WorkflowID==='STAGE-SIX-V1' && ['Ready','In Progress'].includes(task.Status)) || tasks.find(task=>task.WorkflowID==='STAGE-SIX-V1' && task.Status==='On hold') || tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
   const issues = tasks.filter((task) => task.Status === 'Issue Reported').length;
   const delays = tasks.filter((task) => task.Status.includes('Delay')).length;
   const approvals = (await store.approvals()).filter((item) => item.ProjectID === project.ProjectID).length;
@@ -423,6 +425,7 @@ async function verifyAssigned(task, from, token, chatId) {
 }
 
 async function submitDelay({ project, task, user, days, reason, groupChatId }) {
+  if(task.WorkflowID==='STAGE-SIX-V1') return sendMessage(config.groupToken,groupChatId,'Use /hold TASK_ID reason for linked stages. Resume recalculates the remaining schedule.');
   const approvalId = await store.requestDelay({ project, task, actor: user, days, reason });
   const approverTelegramId = project.LeaderTelegramID || config.founderTelegramId;
   await sendMessage(config.groupToken, groupChatId, `⏳ Delay request sent for approval: <b>${escape(task.TaskName)}</b> — ${days} day(s).`);
@@ -435,6 +438,7 @@ async function submitDelay({ project, task, user, days, reason, groupChatId }) {
 }
 
 async function submitIssue({ project, task, user, issue, groupChatId }) {
+  if(task.WorkflowID==='STAGE-SIX-V1') return sendMessage(config.groupToken,groupChatId,'Reply to the task message to record an issue, or use /hold TASK_ID reason to pause it.');
   await store.updateRow('Tasks', task.rowNumber, { Status: 'Issue Reported', IssueText: issue, LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(user.id) });
   await store.audit({ projectId: project.ProjectID, taskId: task.TaskID, action: 'Issue reported', oldValue: task.Status, newValue: 'Issue Reported', actor: user.id, actorName: user.name, source: 'Telegram group bot', details: issue });
   const recipientTelegramId = project.LeaderTelegramID || config.founderTelegramId;
@@ -443,6 +447,10 @@ async function submitIssue({ project, task, user, issue, groupChatId }) {
 }
 
 async function finishTask({ project, task, user, token, chatId }) {
+  if(task.WorkflowID==='STAGE-SIX-V1'){
+    try{await actOnStageTask(store,project,task.TaskID,'done',{actorId:user.id});await dispatchStageHandoffs(store,project,config.groupToken);return sendMessage(token,chatId,'Linked task updated.');}
+    catch(error){return sendMessage(token,chatId,escape(error.message));}
+  }
   const tasks = await store.tasksForProject(project.ProjectID);
   const revisions = task.GateType ? await store.revisionsForTask(task.TaskID) : [];
   const block = completionBlockReason(task, tasks, revisions);
@@ -972,6 +980,22 @@ async function leaderCallback(callback) {
 
 poll(config.groupToken, 'Project group bot', async (update) => {
   await discoverGroup(update);
+  if(update.callback_query?.data?.startsWith('stage:')){
+    const query=update.callback_query;const [,action,...id]=query.data.split(':');
+    const project=await store.projectForGroup(String(query.message?.chat.id||''));
+    try{if(!project)throw new Error('Project not found.');await actOnStageTask(store,project,id.join(':'),action,{actorId:query.from.id});await answerCallback(config.groupToken,query.id,'Task updated.');await dispatchStageHandoffs(store,project,config.groupToken);}
+    catch(error){await answerCallback(config.groupToken,query.id,error.message.slice(0,180));}return;
+  }
+  if(update.message && groupOnly(update.message.chat)){
+    const project=await store.projectForGroup(String(update.message.chat.id));
+    if(project?.WorkflowConfigJSON){
+      const command=(update.message.text||'').match(/^\/(done|approve|hold|resume|changes)(?:@[\w]+)?\s+(\S+)(?:\s+([\s\S]*))?$/i);
+      try{
+        if(command){await actOnStageTask(store,project,command[2],command[1].toLowerCase(),{actorId:update.message.from.id,reason:command[3]||''});await sendMessage(config.groupToken,project.GroupChatID,'Linked task updated.');await dispatchStageHandoffs(store,project,config.groupToken);return;}
+        if(await captureStageReply(store,project,update.message)){retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Task file save pending.'));return;}
+      }catch(error){await sendMessage(config.groupToken,project.GroupChatID,escape(error.message));return;}
+    }
+  }
   if (update.message) await handleProjectResourceUpload(update.message);
   if (update.message) {
     let request;
@@ -1024,6 +1048,7 @@ poll(config.groupToken, 'Project group bot', async (update) => {
         await sendMessage(config.groupToken, update.message.chat.id, await projectTldr(project));
         return;
       }
+      if(project?.WorkflowConfigJSON && naturalLanguageUpdate){await sendMessage(config.groupToken,update.message.chat.id,'Use the assigned task’s Complete or Approve button. To pause it, use /hold TASK_ID reason.');return;}
       if (project && naturalLanguageUpdate) await interpretNaturalLanguage(update.message, project, naturalLanguageUpdate);
     }
   }
@@ -1046,3 +1071,6 @@ poll(config.leaderToken, 'Founder bot', async (update) => {
 
 setInterval(()=>retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.')),60000);
 retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.'));
+
+let stageRetrying=false;
+setInterval(async()=>{if(stageRetrying)return;stageRetrying=true;try{for(const project of (await store.rows('Projects')).filter(p=>p.WorkflowConfigJSON && p.Status==='Active'))await dispatchStageHandoffs(store,project,config.groupToken);}catch{console.warn('Stage handoff retry pending.');}finally{stageRetrying=false;}},60000);
