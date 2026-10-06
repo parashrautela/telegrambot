@@ -11,13 +11,14 @@ export const SHEETS = {
   ],
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
-    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes', 'ClientTelegramID', 'WebManaged', 'WorkflowAnnouncementStatus',
+    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes', 'ClientTelegramID', 'WebManaged', 'WorkflowAnnouncementStatus', 'WorkflowConfigJSON',
   ],
   WorkflowTemplates: [
     'WorkflowID', 'Sequence', 'Stage', 'TaskName', 'DurationDays',
     'DefaultRole', 'PredecessorTemplateID', 'Required', 'Milestone',
     'DependencySequences', 'DependencyType', 'GateType', 'Audience', 'Phase', 'Trade', 'TemplateVersion',
   ],
+  TaskUpdates: ['UpdateID', 'ProjectID', 'TaskID', 'GroupChatID', 'SourceMessageID', 'TelegramUserID', 'Text', 'SubmittedAt', 'MediaGroupID'],
   Tasks: [
     'TaskID', 'ProjectID', 'WorkflowID', 'TemplateID', 'Sequence', 'Stage',
     'TaskName', 'AssignedTelegramID', 'AssignedName', 'AssignedRole', 'Status',
@@ -26,7 +27,7 @@ export const SHEETS = {
     'PredecessorTaskID', 'CalendarEventID', 'LastUpdatedAt', 'LastUpdatedBy',
     'PredecessorTaskIDs', 'DependencyType', 'ForecastStart', 'ForecastEnd',
     'ActualStart', 'ActualEnd', 'GateType', 'Audience', 'Phase', 'Trade',
-    'TemplateVersion', 'BlockedReason',
+    'TemplateVersion', 'BlockedReason', 'StageID', 'StepKey', 'StepOrder', 'DrawingRevision', 'ApprovedRevision', 'HoldReason', 'BeforeHoldStatus', 'TaskMessageID', 'NotificationState',
   ],
   Users: ['TelegramUserID', 'Name', 'Role', 'Active'],
   MemberOnboarding: [
@@ -39,7 +40,7 @@ export const SHEETS = {
   ],
   SubmittedResources: [
     'SubmissionID', 'ProjectID', 'TaskID', 'GroupChatID', 'TelegramUserID',
-    'SubmittedByName', 'ResourceType', 'TelegramFileID', 'FileName', 'Caption', 'SubmittedAt', 'SourceMessageID', 'MimeType', 'WebSyncStatus', 'WebSyncedAt', 'DriveStatus', 'DriveFileID', 'DriveUrl', 'DriveError',
+    'SubmittedByName', 'ResourceType', 'TelegramFileID', 'FileName', 'Caption', 'SubmittedAt', 'SourceMessageID', 'MimeType', 'WebSyncStatus', 'WebSyncedAt', 'DriveStatus', 'DriveFileID', 'DriveUrl', 'DriveError', 'Revision',
   ],
   GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status', 'MigratedTo'],
   GroupMembers: ['GroupChatID', 'TelegramUserID', 'TelegramName', 'MembershipStatus', 'AssignedName', 'AssignedRole', 'UpdatedAt'],

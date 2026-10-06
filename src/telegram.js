@@ -7,8 +7,8 @@ const api = async (token, method, body = {}) => {
   return json.result;
 };
 
-export const sendMessage = (token, chatId, text, replyMarkup) => api(token, 'sendMessage', {
-  chat_id: chatId, text, parse_mode: 'HTML', ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+export const sendMessage = (token, chatId, text, replyMarkup, options = {}) => api(token, 'sendMessage', {
+  chat_id: chatId, text, parse_mode: 'HTML', ...(options.reply_parameters ? {reply_parameters:options.reply_parameters} : {}), ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
 });
 export const sendPhoto = (token, chatId, photo, caption = '') => api(token, 'sendPhoto', {
   chat_id: chatId, photo, ...(caption ? { caption, parse_mode: 'HTML' } : {}),
