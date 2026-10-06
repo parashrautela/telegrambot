@@ -197,7 +197,7 @@ export class SheetStore {
 
   async groupSnapshot() {
     const [groups, members] = await Promise.all([this.rows('GroupRegistry'), this.rows('GroupMembers')]);
-    return groups.map((group) => ({ groupChatId: String(group.GroupChatID), title: group.GroupTitle, status: group.Status, members: members.filter((member) => String(member.GroupChatID) === String(group.GroupChatID)).map((member) => ({ telegramUserId: String(member.TelegramUserID), telegramName: member.TelegramName, membershipStatus: member.MembershipStatus, assignedName: member.AssignedName, assignedRole: member.AssignedRole })) }));
+    return groups.map((group) => ({ groupChatId: String(group.GroupChatID), title: group.GroupTitle, status: group.Status, migratedTo: group.MigratedTo || '', members: members.filter((member) => String(member.GroupChatID) === String(group.GroupChatID) && ['Active','Left'].includes(member.MembershipStatus)).map((member) => ({ telegramUserId: String(member.TelegramUserID), telegramName: member.TelegramName, membershipStatus: member.MembershipStatus, assignedName: member.AssignedName, assignedRole: member.AssignedRole })) }));
   }
 
   async groupMember(groupChatId, telegramUserId) {
