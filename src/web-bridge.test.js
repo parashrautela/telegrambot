@@ -19,6 +19,7 @@ test('web bridge assigns a group role and creates a linked project shell', async
   const members = [{ GroupChatID: '-456', TelegramUserID: '123', TelegramName: 'Asha', MembershipStatus: 'Active', AssignedName: '', AssignedRole: '', rowNumber: 2 }];
   const projects = [];
   const store = {
+    groupSnapshot: async()=>[{groupChatId:'-456',title:'Site Group',status:'Available',members:[]}],
     rows: async (sheet) => ({ GroupRegistry: groups, GroupMembers: members, Projects: projects }[sheet] || []),
     assignGroupRole: async ({ name, role }) => { members[0].AssignedName = name; members[0].AssignedRole = role; return true; },
     projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id),
@@ -41,6 +42,8 @@ test('web bridge assigns a group role and creates a linked project shell', async
   };
   try {
     await new Promise((resolve) => server.once('listening', resolve));
+    assert.equal((await post('/api/integrations/web/groups',{},false)).status,401);
+    assert.equal((await post('/api/integrations/web/groups',{})).body.groups[0].groupChatId,'-456');
     const role = { groupChatId: '-456', telegramUserId: '123', name: 'Asha Kumar', role: 'Client' };
     assert.equal((await post('/api/integrations/web/group-members', role, false)).status, 401);
     assert.equal((await post('/api/integrations/web/group-members', role)).status, 200);

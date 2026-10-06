@@ -25,6 +25,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
       if (!equal((req.headers.authorization || '').replace(/^Bearer /i, ''), secret)) return respond(res, 401, { error: 'Integration authentication required.' });
+      if(req.method==='POST' && req.url==='/api/integrations/web/groups')return respond(res,200,{groups:await store.groupSnapshot()});
       if (req.method === 'POST' && req.url === '/api/integrations/web/group-members') {
         const input = await readBody(req);
         const groupChatId = String(input.groupChatId || '');
