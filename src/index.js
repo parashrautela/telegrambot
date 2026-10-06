@@ -178,7 +178,7 @@ async function nextProjectId() {
 }
 
 async function projectTldr(project) {
-  const tasks = (await store.tasksForProject(project.ProjectID)).sort((left, right) => Number(left.Sequence) - Number(right.Sequence));
+  const tasks = (await store.tasksForProject(project.ProjectID)).filter(task=>!String(task.Status).startsWith('Archived')).sort((left, right) => Number(left.Sequence) - Number(right.Sequence));
   const completed = tasks.filter((task) => task.Status === 'Completed').length;
   const current = tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
   const issues = tasks.filter((task) => task.Status === 'Issue Reported').length;

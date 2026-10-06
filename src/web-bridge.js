@@ -27,6 +27,35 @@ export function startWebBridge({ store, token, founderTelegramId }) {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
       if (!equal((req.headers.authorization || '').replace(/^Bearer /i, ''), secret)) return respond(res, 401, { error: 'Integration authentication required.' });
+      if(req.method==='POST' && req.url==='/api/integrations/web/tasks/sync') {
+        const input=await readBody(req);const project=await store.projectForGroup(String(input.groupChatId || ''));
+        if(!project || project.WebManaged!=='Yes')return respond(res,404,{error:'Web-managed project not found.'});
+        const syncKey='tasks:'+project.ProjectID;
+        if(startingProjects.has(syncKey))return respond(res,409,{error:'Task sync is in progress.'});
+        startingProjects.add(syncKey);
+        try {
+        if(!Array.isArray(input.updates) || input.updates.length>200)return respond(res,400,{error:'Invalid task updates.'});
+        const tasks=await store.tasksForProject(project.ProjectID);
+        const all=await store.rows('Tasks');
+        const updates=[];const seen=new Set();
+        for(const item of input.updates){
+          if(typeof item.taskId!=='string' || !/^[A-Za-z0-9_-]{1,160}$/.test(item.taskId) || typeof item.title!=='string' || !item.title.trim() || item.title.length>200 || typeof item.stage!=='string' || item.stage.length>120 || !['Pending','In Progress','Issue Reported','Completed','Archived'].includes(item.status) || typeof item.deadline!=='string' || (item.deadline && (!/^\d{4}-\d{2}-\d{2}$/.test(item.deadline) || !Number.isFinite(Date.parse(item.deadline)) || new Date(item.deadline).toISOString().slice(0,10)!==item.deadline)))return respond(res,400,{error:'Invalid task fields.'});
+          if(seen.has(item.taskId))return respond(res,400,{error:'Duplicate task update.'});seen.add(item.taskId);
+          const existing=all.find(task=>task.TaskID===item.taskId);
+          if(existing && existing.ProjectID!==project.ProjectID)return respond(res,409,{error:'Task belongs to another project.'});
+          if(!existing && !/^WEB-[0-9a-f-]{36}$/.test(item.taskId))return respond(res,404,{error:'Workflow task not found.'});
+          const assignee=item.assigneeTelegramId==='founder'?String(project.LeaderTelegramID || founderTelegramId):String(item.assigneeTelegramId || '');
+          if(assignee && !/^\d+$/.test(assignee))return respond(res,400,{error:'Invalid task assignee.'});
+          updates.push({existing,item,assignee});
+        }
+        for(const {existing,item,assignee} of updates){
+          const changes={TaskName:item.title,Stage:item.stage,Status:item.status,PlannedEnd:item.deadline,CurrentEnd:item.deadline,AssignedTelegramID:assignee,AssignedName:String(item.assigneeName || '').slice(0,100),LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(founderTelegramId)};
+          if(existing)await store.updateRow('Tasks',existing.rowNumber,changes);
+          else {await store.append('Tasks',{TaskID:item.taskId,ProjectID:project.ProjectID,WorkflowID:'WEB-CUSTOM',Sequence:Math.max(0,...tasks.map(task=>Number(task.Sequence)||0))+10,...changes},{raw:true});tasks.push({TaskID:item.taskId,Sequence:Math.max(0,...tasks.map(task=>Number(task.Sequence)||0))+10});}
+        }
+        return respond(res,200,{tasks:await store.tasksForProject(project.ProjectID)});
+        } finally { startingProjects.delete(syncKey); }
+      }
       if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/publish'].includes(req.url)) {
         const input = await readBody(req);
         const request = (await store.rows('DecisionRequests')).find(row => row.RequestID === input.requestId && String(row.GroupChatID) === String(input.groupChatId));
@@ -126,7 +155,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         await store.updateRow('Projects',project.rowNumber,{WebManaged:'Yes'});
         const roster = (await store.rows('GroupMembers')).filter((member)=>String(member.GroupChatID)===groupChatId && member.MembershipStatus==='Active');
         if (roster.length < 2 || roster.some((member)=>!member.AssignedName || !member.AssignedRole) || roster.filter((member)=>/\bclient\b/i.test(member.AssignedRole)).length!==1 || !roster.some((member)=>!/\b(client|founder)\b/i.test(member.AssignedRole))) return respond(res,409,{error:'Assign one client and at least one team member, and finish all member profiles first.'});
-        let tasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>!String(task.Status).startsWith('Archived'));
+        let tasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>!String(task.Status).startsWith('Archived') && task.WorkflowID!=='WEB-CUSTOM');
         if (tasks.length && tasks.some((task)=>task.WorkflowID!==option.id)) return respond(res,409,{error:'This project already has a different workflow.'});
         if (!tasks.length) {
           if (!/^\d{4}-\d{2}-\d{2}$/.test(input.startDate || '') || !Number.isFinite(Date.parse(input.startDate)) || new Date(input.startDate).toISOString().slice(0,10)!==input.startDate) return respond(res,400,{error:'Enter a valid start date.'});

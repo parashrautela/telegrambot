@@ -18,15 +18,17 @@ test('web bridge assigns a group role and creates a linked project shell', async
   const groups = [{ GroupChatID: '-456', GroupTitle: 'Site Group', Status: 'Available', rowNumber: 2 }];
   const members = [{ GroupChatID: '-456', TelegramUserID: '123', TelegramName: 'Asha', MembershipStatus: 'Active', AssignedName: '', AssignedRole: '', rowNumber: 2 }];
   const projects = [];
+  const tasks=[];
   const requests=[{RequestID:'req',GroupChatID:'-456',SourceMessageID:'10',AttachmentsJSON:JSON.stringify([{type:'Photo',fileId:'photo'}]),rowNumber:2}];
   const store = {
     groupSnapshot: async()=>[{groupChatId:'-456',title:'Site Group',status:'Available',members:[]}],
-    rows: async (sheet) => ({ GroupRegistry: groups, GroupMembers: members, Projects: projects, DecisionRequests:requests }[sheet] || []),
+    rows: async (sheet) => ({ GroupRegistry: groups, GroupMembers: members, Projects: projects, DecisionRequests:requests,Tasks:tasks }[sheet] || []),
     assignGroupRole: async ({ name, role }) => { members[0].AssignedName = name; members[0].AssignedRole = role; return true; },
+    tasksForProject:async(id)=>tasks.filter(t=>t.ProjectID===id),
     projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id),
     onboardingForMember: async () => null,
-    append: async (sheet, row) => { if (sheet === 'Projects') projects.push({ ...row, rowNumber: 2 }); },
-    updateRow: async (sheet, number, changes) => Object.assign((sheet==='DecisionRequests'?requests:projects).find((row)=>row.rowNumber===number),changes),
+    append: async (sheet, row) => { if (sheet === 'Projects') projects.push({ ...row, rowNumber: 2 }); if(sheet==='Tasks')tasks.push({...row,rowNumber:tasks.length+2}); },
+    updateRow: async (sheet, number, changes) => Object.assign((sheet==='DecisionRequests'?requests:sheet==='Tasks'?tasks:projects).find((row)=>row.rowNumber===number),changes),
     audit: async () => {}, markGroupLinked: async () => {},
   };
   const sent = [];
@@ -68,6 +70,14 @@ test('web bridge assigns a group role and creates a linked project shell', async
     const project = { groupChatId: '-456', projectName: 'Site Group', clientName: 'Asha Kumar', startDate: '2026-09-30' };
     assert.equal((await post('/api/integrations/web/projects', project)).body.projectId, 'P001');
     assert.equal(projects.length, 1);
+    const sync='/api/integrations/web/tasks/sync',update={taskId:'WEB-12345678-1234-1234-1234-123456789abc',title:'Follow up',stage:'Design',status:'Completed',deadline:'2026-10-08',assigneeTelegramId:'founder',assigneeName:'Founder'};
+    assert.equal((await post(sync,{groupChatId:'-456',updates:[update]},false)).status,401);
+    assert.equal((await post(sync,{groupChatId:'-999',updates:[update]})).status,404);
+    assert.equal((await post(sync,{groupChatId:'-456',updates:[update]})).body.tasks[0].Status,'Completed');
+    assert.equal((await post(sync,{groupChatId:'-456',updates:[update]})).body.tasks.length,1);
+    assert.equal((await post(sync,{groupChatId:'-456',updates:[{...update,status:'Archived'}]})).body.tasks[0].Status,'Archived');
+    assert.equal((await post(sync,{groupChatId:'-456',updates:[{...update,taskId:'P999-T001'}]})).status,404);
+
     assert.equal((await post('/api/integrations/web/projects', project)).body.projectId, 'P001');
   } finally {
     await new Promise((resolve) => server.close(resolve));
