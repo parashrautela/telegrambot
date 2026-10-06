@@ -35,11 +35,11 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         startingProjects.add(syncKey);
         try {
         if(!Array.isArray(input.updates) || input.updates.length>200)return respond(res,400,{error:'Invalid task updates.'});
-        const tasks=await store.tasksForProject(project.ProjectID);
         const all=await store.rows('Tasks');
+        const tasks=all.filter(task=>task.ProjectID===project.ProjectID);
         const updates=[];const seen=new Set();
         for(const item of input.updates){
-          if(typeof item.taskId!=='string' || !/^[A-Za-z0-9_-]{1,160}$/.test(item.taskId) || typeof item.title!=='string' || !item.title.trim() || item.title.length>200 || typeof item.stage!=='string' || item.stage.length>120 || !['Pending','In Progress','Issue Reported','Completed','Archived'].includes(item.status) || typeof item.deadline!=='string' || (item.deadline && (!/^\d{4}-\d{2}-\d{2}$/.test(item.deadline) || !Number.isFinite(Date.parse(item.deadline)) || new Date(item.deadline).toISOString().slice(0,10)!==item.deadline)))return respond(res,400,{error:'Invalid task fields.'});
+          if(typeof item.taskId!=='string' || !/^[A-Za-z0-9_.-]{1,160}$/.test(item.taskId) || typeof item.title!=='string' || !item.title.trim() || item.title.length>200 || typeof item.stage!=='string' || item.stage.length>120 || !['Pending','In Progress','Issue Reported','Completed','Archived'].includes(item.status) || typeof item.deadline!=='string' || (item.deadline && (!/^\d{4}-\d{2}-\d{2}$/.test(item.deadline) || !Number.isFinite(Date.parse(item.deadline)) || new Date(item.deadline).toISOString().slice(0,10)!==item.deadline)))return respond(res,400,{error:'Invalid task fields.'});
           if(seen.has(item.taskId))return respond(res,400,{error:'Duplicate task update.'});seen.add(item.taskId);
           const existing=all.find(task=>task.TaskID===item.taskId);
           if(existing && existing.ProjectID!==project.ProjectID)return respond(res,409,{error:'Task belongs to another project.'});
@@ -48,6 +48,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           if(assignee && !/^\d+$/.test(assignee))return respond(res,400,{error:'Invalid task assignee.'});
           updates.push({existing,item,assignee});
         }
+        if(!updates.length)return respond(res,200,{tasks});
         for(const {existing,item,assignee} of updates){
           const changes={TaskName:item.title,Stage:item.stage,Status:item.status,PlannedEnd:item.deadline,CurrentEnd:item.deadline,AssignedTelegramID:assignee,AssignedName:String(item.assigneeName || '').slice(0,100),LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(founderTelegramId)};
           if(existing)await store.updateRow('Tasks',existing.rowNumber,changes);
