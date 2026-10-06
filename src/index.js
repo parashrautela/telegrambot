@@ -6,6 +6,8 @@ import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
 import { applyReviewDecision, completionBlockReason, createDraftRevision, dependencyEdges, forecastDelayImpact, previewTradeOrderOverride, resolveDrawing } from './workflow-engine.js';
 import { answerCallback, getChatAdministrators, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
+import { archiveProjectResource } from './drive-storage.js';
+import { retryProjectResources } from './project-resources.js';
 import { startWebBridge } from './web-bridge.js';
 
 const config = botConfig();
@@ -218,28 +220,25 @@ async function handleProjectResourceUpload(message) {
   const project = await store.projectForGroup(message.chat.id);
   if (!project || ['Completed', 'Abandoned'].includes(project.Status)) return;
   const user = actor(message.from);
-  const knownUser = await store.user(message.from.id);
-  const maySubmit = String(message.from.id) === config.founderTelegramId || /\bclient\b/i.test(knownUser?.Role || '');
+  const roster = await store.groupMember(message.chat.id,message.from.id);
+  const maySubmit = String(message.from.id) === config.founderTelegramId || (roster?.MembershipStatus === 'Active' && Boolean(roster.AssignedRole));
   if (!maySubmit) return;
   const task = (await store.tasksForProject(project.ProjectID)).find((item) => item.Stage === 'Resources' && item.Status !== 'Completed');
-  if (!task) return;
   const document = message.document;
   const photo = message.photo?.at(-1);
   const resourceType = document ? 'Document' : 'Photo';
   const fileId = document?.file_id || photo?.file_id;
-  const fileName = document?.file_name || `photo-${message.message_id}`;
-  await store.saveSubmittedResource({
-    projectId: project.ProjectID, taskId: task.TaskID, groupChatId: message.chat.id, user,
-    resourceType, fileId, fileName, caption: message.caption || '',
+  const fileName = (document?.file_name || `photo-${message.message_id}.jpg`).slice(0,200);
+  const submission = await store.saveSubmittedResource({
+    projectId: project.ProjectID, taskId: task?.TaskID || '', groupChatId: message.chat.id, user,
+    resourceType, fileId, fileName, caption: message.caption || '', sourceMessageId: message.message_id, mimeType: document?.mime_type || 'image/jpeg',
   });
-  await store.updateRow('Tasks', task.rowNumber, {
-    Status: 'Resources received — Review needed',
-    LastUpdatedAt: new Date().toISOString(),
-    LastUpdatedBy: String(user.id),
-  });
-  await store.audit({ projectId: project.ProjectID, taskId: task.TaskID, action: 'Project resource submitted', oldValue: task.Status, newValue: 'Resources received — Review needed', actor: user.id, actorName: user.name, source: 'Telegram group bot', details: `${resourceType}: ${fileName}` });
-  await sendMessage(config.groupToken, message.chat.id, `✅ Thanks ${escape(user.name)} — I logged this ${resourceType.toLowerCase()} under the project resources. The founder can review it before moving to the next step.`);
-  return sendMessage(config.leaderToken, project.LeaderTelegramID || config.founderTelegramId, `📎 <b>Project resource received</b>\n\nProject: ${escape(project.ProjectName)}\nFrom: ${escape(user.name)}\nFile: ${escape(fileName)}\n\nThe Resources task is ready for your review.`);
+  if (!submission.created) return;
+  if (task) await store.updateRow('Tasks',task.rowNumber,{Status:'Resources received — Review needed',LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(user.id)});
+  await store.audit({projectId:project.ProjectID,taskId:task?.TaskID || '',action:'Project resource submitted',actor:user.id,actorName:user.name,source:'Telegram group bot',details:`${resourceType}: ${fileName}`});
+  await sendMessage(config.groupToken,message.chat.id,`✅ ${escape(fileName)} is logged for this project and queued for automatic Google Drive storage. Check Files in the web app for its save status.`);
+  retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.'));
+
 }
 
 function isUntouchedLegacyPlan(project, tasks) {
@@ -247,6 +246,7 @@ function isUntouchedLegacyPlan(project, tasks) {
 }
 
 async function askFounderForPlan({ project, clientName, replaceUntouchedLegacyPlan = false }) {
+  if (project.WebManaged === 'Yes' || (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET)) return; // The web app owns setup for this project.
   const legacyNote = replaceUntouchedLegacyPlan ? '\n\nThis project has an untouched legacy house plan. Choosing an option will archive those unused task records and generate the selected plan; nothing is deleted.' : '';
   return sendMessage(config.leaderToken, config.founderTelegramId, `<b>Client profile complete</b>\n\n${escape(clientName)} is now marked as the client for <b>${escape(project.ProjectName)}</b>. Which plan should we assign?\n\nThe selected plan will generate the project tasks and share its linked resources with the group.${legacyNote}`, {
     inline_keyboard: WORKFLOW_OPTIONS.map((option) => [{ text: option.label, callback_data: `choose_plan:${project.ProjectID}:${option.id}` }]),
@@ -889,6 +889,7 @@ async function leaderCallback(callback) {
     const legacyPlan = isUntouchedLegacyPlan(project, existingTasks);
     if (existingTasks.length && !legacyPlan) return answerCallback(config.leaderToken, callback.id, 'This project already has active work, so its plan cannot be replaced automatically.');
     try {
+      if (project.WebManaged === 'Yes' || (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET)) return answerCallback(config.leaderToken, callback.id, 'Choose the project type in the web app.');
       const { assignWorkflowToProject } = await import('./project-service.js');
       const result = await assignWorkflowToProject({ store, project, workflowId, actorTelegramId: config.founderTelegramId, replaceUntouchedLegacyPlan: legacyPlan });
       await answerCallback(config.leaderToken, callback.id, 'Project plan assigned.');
@@ -961,6 +962,7 @@ async function leaderCallback(callback) {
 
 poll(config.groupToken, 'Project group bot', async (update) => {
   await discoverGroup(update);
+  if (update.message) await handleProjectResourceUpload(update.message);
   if (update.message) {
     let request;
     try {
@@ -996,7 +998,6 @@ poll(config.groupToken, 'Project group bot', async (update) => {
       }
     }
   }
-  if (update.message) await handleProjectResourceUpload(update.message);
   if (update.message?.text) {
     const mentioned = update.message.text.toLowerCase().includes(groupBotMention);
     console.log(`Group bot received update ${update.update_id} in ${update.message.chat.type}; mentioned: ${mentioned}; command: ${update.message.text.startsWith('/')}.`);
@@ -1022,7 +1023,7 @@ poll(config.groupToken, 'Project group bot', async (update) => {
     await welcomeNewProjectMember(update);
   }
 });
-startWebBridge({ store, token: config.groupToken, founderTelegramId: config.founderTelegramId, onClientReady: (project, clientName) => askFounderForPlan({ project, clientName }) });
+startWebBridge({ store, token: config.groupToken, founderTelegramId: config.founderTelegramId });
 setInterval(() => syncGroupRoster().catch((error) => console.warn(error.message)), 60_000);
 syncGroupRoster().catch((error) => console.warn(error.message));
 setInterval(() => retryDecisionRequestSync(store).catch(() => console.warn('Request sync retry failed; will retry next minute.')), 60_000);
@@ -1032,3 +1033,6 @@ poll(config.leaderToken, 'Founder bot', async (update) => {
   else if (update.message?.text) await leaderNaturalLanguageReply(update.message);
   if (update.callback_query) await leaderCallback(update.callback_query);
 });
+
+setInterval(()=>retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.')),60000);
+retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.'));

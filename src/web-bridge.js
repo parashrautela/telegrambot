@@ -1,7 +1,10 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { createProjectShell } from './project-service.js';
+import { createProjectShell, assignWorkflowToProject } from './project-service.js';
 import { getChatMember, sendMessage } from './telegram.js';
+
+import { downloadProjectResource } from './drive-storage.js';
+import { WORKFLOW_OPTIONS } from './schema.js';
 
 const active = new Set(['creator', 'owner', 'administrator', 'member', 'restricted']);
 const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
@@ -13,10 +16,11 @@ async function readBody(req) {
   return JSON.parse(raw || '{}');
 }
 
-export function startWebBridge({ store, token, founderTelegramId, onClientReady }) {
+export function startWebBridge({ store, token, founderTelegramId }) {
   const secret = process.env.INTEGRATION_SHARED_SECRET;
   if (!secret) return null;
   const port = Number(process.env.BOT_BRIDGE_PORT || process.env.PORT || 3001);
+  const startingProjects = new Set();
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
@@ -37,10 +41,71 @@ export function startWebBridge({ store, token, founderTelegramId, onClientReady 
           const onboarding = await store.onboardingForMember(project.ProjectID, telegramUserId);
           if (onboarding?.Status === 'Pending') await store.approveOnboarding(onboarding, { name, role, founderTelegramId });
           if (!onboarding) await store.append('MemberOnboarding', { OnboardingID: `ONB-WEB-${groupChatId}-${telegramUserId}`, ProjectID: project.ProjectID, GroupChatID: groupChatId, TelegramUserID: telegramUserId, TelegramName: membership.user?.first_name || name, JoinedAt: new Date().toISOString(), Status: 'Approved', AssignedName: name, AssignedRole: role, ApprovedAt: new Date().toISOString(), ApprovedByTelegramID: String(founderTelegramId) }, { raw: true });
-          if (/\bclient\b/i.test(role) && project.Status === 'Awaiting client plan') await onClientReady(project, name);
+          // Web-managed setup selects its plan in the web app, never the personal bot.
         }
         if (changed) await sendMessage(token, groupChatId, `✅ <b>${escape(name)}</b> is assigned as <b>${escape(role)}</b> for this project.`);
         return respond(res, 200, { ok: true, changed });
+      }
+      if (req.method === 'POST' && ['/api/integrations/web/resources','/api/integrations/web/resources/content'].includes(req.url)) {
+        const input=await readBody(req);const project=await store.projectForGroup(String(input.groupChatId || ''));
+        if(!project)return respond(res,404,{error:'Project not found.'});
+        const files=(await store.rows('SubmittedResources')).filter((row)=>row.ProjectID===project.ProjectID);
+        if(req.url.endsWith('/content')) {
+          const file=files.find((row)=>row.SubmissionID===input.submissionId && row.DriveStatus==='Stored');
+          if(!file)return respond(res,404,{error:'Stored file not found.'});
+          const bytes=await downloadProjectResource(file.DriveFileID);
+          return respond(res,200,{bytes:bytes.toString('base64'),mimeType:file.MimeType || 'application/octet-stream'});
+        }
+        return respond(res,200,{files});
+      }
+      if (req.method === 'POST' && req.url === '/api/integrations/web/workflows') {
+        const templates = await store.rows('WorkflowTemplates');
+        const workflows = WORKFLOW_OPTIONS.map((option) => {
+          const rows = templates.filter((row) => row.WorkflowID === option.id).sort((a,b)=>Number(a.Sequence)-Number(b.Sequence));
+          const stages = [];
+          for (const row of rows) {
+            let stage = stages.find((item)=>item.name === row.Stage);
+            if (!stage) { stage = {name:row.Stage,durationDays:0,tasks:[]}; stages.push(stage); }
+            stage.durationDays += Number(row.DurationDays) || 0; stage.tasks.push(row.TaskName);
+          }
+          return {id:option.id,name:option.label,description:option.description,stages,parallel:option.id==='RESIDENTIAL-INTERIOR-V1'};
+        }).filter((workflow)=>workflow.stages.length);
+        return respond(res,200,{workflows});
+      }
+      if (req.method === 'POST' && req.url === '/api/integrations/web/projects/start') {
+        const input = await readBody(req); const groupChatId = String(input.groupChatId || '');
+        if (startingProjects.has(groupChatId)) return respond(res,409,{error:'Project start is already in progress. Refresh shortly.'});
+        startingProjects.add(groupChatId);
+        try {
+        const project = await store.projectForGroup(groupChatId);
+        const option = WORKFLOW_OPTIONS.find((item)=>item.id === input.workflowId);
+        if (!project || !option) return respond(res,404,{error:'Linked project or workflow not found.'});
+        if (['Completed','Abandoned'].includes(project.Status)) return respond(res,409,{error:'This project is closed.'});
+        await store.updateRow('Projects',project.rowNumber,{WebManaged:'Yes'});
+        const roster = (await store.rows('GroupMembers')).filter((member)=>String(member.GroupChatID)===groupChatId && member.MembershipStatus==='Active');
+        if (roster.length < 2 || roster.some((member)=>!member.AssignedName || !member.AssignedRole) || roster.filter((member)=>/\bclient\b/i.test(member.AssignedRole)).length!==1 || !roster.some((member)=>!/\b(client|founder)\b/i.test(member.AssignedRole))) return respond(res,409,{error:'Assign one client and at least one team member, and finish all member profiles first.'});
+        let tasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>!String(task.Status).startsWith('Archived'));
+        if (tasks.length && tasks.some((task)=>task.WorkflowID!==option.id)) return respond(res,409,{error:'This project already has a different workflow.'});
+        if (!tasks.length) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(input.startDate || '') || !Number.isFinite(Date.parse(input.startDate)) || new Date(input.startDate).toISOString().slice(0,10)!==input.startDate) return respond(res,400,{error:'Enter a valid start date.'});
+          await store.updateRow('Projects',project.rowNumber,{StartDate:input.startDate,WebManaged:'Yes'});
+          await assignWorkflowToProject({store,project:{...project,StartDate:input.startDate},workflowId:option.id,actorTelegramId:founderTelegramId});
+          tasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>task.WorkflowID===option.id);
+        }
+        const expected = (await store.rows('WorkflowTemplates')).filter((row)=>row.WorkflowID===option.id);
+        if (!expected.length || tasks.length!==expected.length || !expected.every((row)=>tasks.some((task)=>String(task.Sequence)===String(row.Sequence)))) return respond(res,409,{error:'The Telegram plan is incomplete. Repair it before starting the web workspace.'});
+        const updated = await store.projectForGroup(groupChatId);
+        let announcementStatus = updated.WorkflowAnnouncementStatus || '';
+        if (!announcementStatus) {
+          await store.updateRow('Projects',project.rowNumber,{WorkflowAnnouncementStatus:'Sending',WebManaged:'Yes'});
+          try {
+            await sendMessage(token,groupChatId,`<b>Project started — ${escape(option.label)}</b>\n\n${escape(project.ProjectName)} is now running the ${escape(option.label)} workflow. ${tasks.length} tasks have been generated.\n\nPlease share the project plans, reference photos and documents in this group. They will be saved automatically in the project's Files tab. Use /tasks to see the plan.`);
+            announcementStatus='Sent';
+          } catch { announcementStatus='Unknown'; }
+          await store.updateRow('Projects',project.rowNumber,{WorkflowAnnouncementStatus:announcementStatus});
+        }
+        return respond(res,200,{projectId:project.ProjectID,workflowId:option.id,workflowName:option.label,tasks,announcementStatus:announcementStatus==='Sending'?'Unknown':announcementStatus});
+        } finally { startingProjects.delete(groupChatId); }
       }
       if (req.method === 'POST' && req.url === '/api/integrations/web/projects') {
         const input = await readBody(req);
@@ -61,8 +126,10 @@ export function startWebBridge({ store, token, founderTelegramId, onClientReady 
             if (await store.onboardingForMember(project.ProjectID, member.TelegramUserID)) continue;
             await store.append('MemberOnboarding', { OnboardingID: `ONB-WEB-${groupChatId}-${member.TelegramUserID}`, ProjectID: project.ProjectID, GroupChatID: groupChatId, TelegramUserID: member.TelegramUserID, TelegramName: member.TelegramName, JoinedAt: new Date().toISOString(), Status: 'Approved', AssignedName: member.AssignedName, AssignedRole: member.AssignedRole, ApprovedAt: new Date().toISOString(), ApprovedByTelegramID: String(founderTelegramId) }, { raw: true });
           }
-          await onClientReady(project, clientName);
+          await store.updateRow('Projects', project.rowNumber, { WebManaged: 'Yes' });
+          await sendMessage(token, groupChatId, `<b>Project created — ${escape(name)}</b>\n\nAdd the project members in Telegram, then assign their names and roles and choose the project type in the web app.`);
         }
+        await store.updateRow('Projects',project.rowNumber,{WebManaged:'Yes'});
         return respond(res, 200, { projectId: project.ProjectID, projectName: project.ProjectName });
       }
       return respond(res, 404, { error: 'Not found.' });

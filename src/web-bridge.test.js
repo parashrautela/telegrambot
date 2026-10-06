@@ -24,6 +24,7 @@ test('web bridge assigns a group role and creates a linked project shell', async
     projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id),
     onboardingForMember: async () => null,
     append: async (sheet, row) => { if (sheet === 'Projects') projects.push({ ...row, rowNumber: 2 }); },
+    updateRow: async (sheet, number, changes) => Object.assign(projects.find((row)=>row.rowNumber===number),changes),
     audit: async () => {}, markGroupLinked: async () => {},
   };
   const sent = [];

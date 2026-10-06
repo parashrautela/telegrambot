@@ -229,12 +229,13 @@ export class SheetStore {
       .sort((left, right) => Number(left.SortOrder || 0) - Number(right.SortOrder || 0));
   }
 
-  async saveSubmittedResource({ projectId, taskId, groupChatId, user, resourceType, fileId, fileName, caption }) {
-    await this.append('SubmittedResources', {
-      SubmissionID: id('RES'), ProjectID: projectId, TaskID: taskId, GroupChatID: String(groupChatId),
-      TelegramUserID: String(user.id), SubmittedByName: user.name, ResourceType: resourceType,
-      TelegramFileID: fileId, FileName: fileName, Caption: caption, SubmittedAt: now(),
-    });
+  async saveSubmittedResource({ projectId, taskId, groupChatId, user, resourceType, fileId, fileName, caption, sourceMessageId, mimeType }) {
+    const submissionId = `RES-${groupChatId}-${sourceMessageId}`;
+    const existing = (await this.rows('SubmittedResources')).find((row)=>row.SubmissionID===submissionId);
+    if (existing) return {record:existing,created:false};
+    const record = {SubmissionID:submissionId, ProjectID:projectId,TaskID:taskId || '',GroupChatID:String(groupChatId),TelegramUserID:String(user.id),SubmittedByName:user.name,ResourceType:resourceType,TelegramFileID:fileId,FileName:fileName,Caption:caption,SubmittedAt:now(),SourceMessageID:String(sourceMessageId),MimeType:mimeType || '',DriveStatus:'Pending',WebSyncStatus:''};
+    await this.append('SubmittedResources',record,{raw:true});
+    return {record,created:true};
   }
 
   async closeProject({ project, outcome, actorTelegramId, actorName }) {
