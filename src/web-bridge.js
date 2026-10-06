@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { loadTelegramAttachment } from './telegram-media.js';
 import { timingSafeEqual } from 'node:crypto';
 import { createProjectShell, assignWorkflowToProject } from './project-service.js';
 import { getChatMember, sendMessage } from './telegram.js';
@@ -21,10 +22,50 @@ export function startWebBridge({ store, token, founderTelegramId }) {
   if (!secret) return null;
   const port = Number(process.env.BOT_BRIDGE_PORT || process.env.PORT || 3001);
   const startingProjects = new Set();
+  const replyingRequests = new Set();
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
       if (!equal((req.headers.authorization || '').replace(/^Bearer /i, ''), secret)) return respond(res, 401, { error: 'Integration authentication required.' });
+      if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/publish'].includes(req.url)) {
+        const input = await readBody(req);
+        const request = (await store.rows('DecisionRequests')).find(row => row.RequestID === input.requestId && String(row.GroupChatID) === String(input.groupChatId));
+        if (!request) return respond(res,404,{error:'Request not found in the linked group.'});
+        if (req.url.endsWith('/content')) {
+          const attachments = JSON.parse(request.AttachmentsJSON || '[]');
+          if (!Number.isInteger(input.attachmentIndex) || input.attachmentIndex < 0 || !attachments[input.attachmentIndex]) return respond(res,404,{error:'Attachment not found.'});
+          const file = await loadTelegramAttachment(attachments[input.attachmentIndex],token);
+          return respond(res,200,{bytes:file.bytes.toString('base64'),mime:file.mime,inline:file.inline});
+        }
+        const answer = typeof input.response === 'string' ? input.response.trim() : '';
+        if (!answer || answer.length > 3000) return respond(res,400,{error:'Enter a response under 3,000 characters.'});
+        if (request.PublishedMessageID) {
+          if (request.Response === answer) return respond(res,200,{ok:true,result:{message_id:Number(request.PublishedMessageID)}});
+          return respond(res,409,{error:'A different response was already published.'});
+        }
+        if (['Sending','Unknown'].includes(request.ReplyDeliveryStatus) || replyingRequests.has(request.RequestID)) return respond(res,409,{error:'Delivery is pending or uncertain. Check Telegram before sending again.'});
+        if (request.Status === 'Done') return respond(res,409,{error:'This request is already done.'});
+        replyingRequests.add(request.RequestID);
+        try {
+          await store.updateRow('DecisionRequests',request.rowNumber,{ReplyDeliveryStatus:'Sending',Response:answer});
+          let result;
+          try {
+            const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({chat_id:request.GroupChatID,text:answer,reply_parameters:{message_id:Number(request.SourceMessageID),allow_sending_without_reply:true}}),signal:AbortSignal.timeout(10000),redirect:'error'});
+            result = await response.json();
+            if (!response.ok || !result.ok) {
+              const status = result.ok === false && response.status < 500 ? 'Failed' : 'Unknown';
+              await store.updateRow('DecisionRequests',request.rowNumber,{ReplyDeliveryStatus:status});
+              return respond(res,200,{ok:false,deliveryStatus:status});
+            }
+            if (!Number.isSafeInteger(result.result?.message_id) || result.result.message_id <= 0) throw new Error('Missing message ID');
+          } catch {
+            await store.updateRow('DecisionRequests',request.rowNumber,{ReplyDeliveryStatus:'Unknown'});
+            return respond(res,200,{ok:false,deliveryStatus:'Unknown'});
+          }
+          await store.updateRow('DecisionRequests',request.rowNumber,{ReplyDeliveryStatus:'Sent',Status:'Published',PublishedMessageID:String(result.result.message_id),PublishedAt:new Date().toISOString()});
+          return respond(res,200,{ok:true,result:{message_id:result.result.message_id}});
+        } finally { replyingRequests.delete(request.RequestID); }
+      }
       if(req.method==='POST' && req.url==='/api/integrations/web/groups')return respond(res,200,{groups:await store.groupSnapshot()});
       if (req.method === 'POST' && req.url === '/api/integrations/web/group-members') {
         const input = await readBody(req);
@@ -136,7 +177,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
       return respond(res, 404, { error: 'Not found.' });
     } catch (error) {
       console.error('Web bridge error:', error.message);
-      return respond(res, 500, { error: 'Could not complete the integration request.' });
+      return respond(res, error.status || 500, { error: error.status ? error.message : 'Could not complete the integration request.' });
     }
   });
   server.listen(port, () => console.log(`Web integration bridge listening on port ${port}.`));
