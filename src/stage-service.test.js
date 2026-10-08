@@ -5,3 +5,33 @@ function fixture(){const project={ProjectID:'P1',GroupChatID:'-123',ProjectName:
 test('start retries do not duplicate tasks and existing active work is preserved',async()=>{const f=fixture();await startStageWorkflow(f.store,f.project,f.config);await startStageWorkflow(f.store,f.project,f.config);assert.equal(f.data.Tasks.length,6);const other=fixture();other.data.Tasks.push({WorkflowID:'HOUSE-V1',Status:'Completed'});await assert.rejects(startStageWorkflow(other.store,other.project,other.config),/migration preview/);assert.equal(other.data.Tasks.length,1);});
 test('handoff tags assignee, persists message mapping, and cannot replay after restart or uncertain send',async()=>{const f=fixture();await startStageWorkflow(f.store,f.project,f.config);const before=globalThis.fetch;let calls=0;globalThis.fetch=async(url,opt)=>{calls++;const message=JSON.parse(opt.body);assert.match(message.text,/tg:\/\/user\?id=1/);return Response.json({ok:true,result:{message_id:77}});};try{await dispatchStageHandoffs(f.store,f.project,'test');assert.equal(f.data.Tasks[0].TaskMessageID,'77');await dispatchStageHandoffs(f.store,f.project,'test');assert.equal(calls,1);f.data.Tasks[0].NotificationState='Sending';await dispatchStageHandoffs(f.store,f.project,'test');assert.equal(calls,1);f.data.Tasks[0].NotificationState='Pending';globalThis.fetch=async()=>{calls++;throw new Error('network');};await dispatchStageHandoffs(f.store,f.project,'test');assert.equal(f.data.Tasks[0].NotificationState,'Unknown');await dispatchStageHandoffs(f.store,f.project,'test');assert.equal(calls,2);}finally{globalThis.fetch=before;}});
 test('task replies and album follow-ups link to task, without completing it; drawing revision must be uploaded',async()=>{const f=fixture();await startStageWorkflow(f.store,f.project,f.config);f.data.Tasks[0].TaskMessageID='10';const msg={message_id:20,reply_to_message:{message_id:10},from:{id:1},photo:[{file_id:'photo'}],media_group_id:'album'};assert.equal(await captureStageReply(f.store,f.project,msg),true);assert.equal(f.data.Tasks[0].Status,'Ready');assert.equal(await captureStageReply(f.store,f.project,{...msg,message_id:21,reply_to_message:undefined}),true);assert.equal(f.data.SubmittedResources[1].TaskID,f.data.Tasks[0].TaskID);assert.equal(await captureStageReply(f.store,f.project,{message_id:22,from:{id:1},text:'Unlinked question'}),false);await actOnStageTask(f.store,f.project,f.data.Tasks[0].TaskID,'done',{actorId:'1'});await assert.rejects(actOnStageTask(f.store,f.project,f.data.Tasks[1].TaskID,'done',{actorId:'2'}),/drawing revision/);f.data.Tasks[1].TaskMessageID='11';await captureStageReply(f.store,f.project,{message_id:23,reply_to_message:{message_id:11},from:{id:2},document:{file_id:'drawing',file_name:'plan.pdf'}});await actOnStageTask(f.store,f.project,f.data.Tasks[1].TaskID,'done',{actorId:'2'});assert.equal(f.data.Tasks[1].DrawingRevision,'1');});
+
+test('full service pilot: linked uploads, revision rejection, holds, approvals and dependent-stage handoff',async()=>{
+ const f=fixture();f.config.stages.push({...f.config.stages[0],id:'electrical',name:'Electrical',dependsOn:['civil']});
+ await startStageWorkflow(f.store,f.project,f.config);
+ const original=globalThis.fetch,sent=[];
+ globalThis.fetch=async(url,opt)=>{sent.push(JSON.parse(opt.body));return Response.json({ok:true,result:{message_id:100+sent.length}});};
+ const task=key=>f.data.Tasks.find(t=>t.StageID==='civil'&&t.StepKey===key);
+ const act=async(key,action,actorId,reason)=>{await actOnStageTask(f.store,f.project,task(key).TaskID,action,{actorId,reason});await dispatchStageHandoffs(f.store,f.project,'test');};
+ const drawing=async(id)=>{await captureStageReply(f.store,f.project,{message_id:id,reply_to_message:{message_id:Number(task('drawing').TaskMessageID)},from:{id:2},document:{file_id:'drawing-'+id,file_name:'plan.pdf'}});await act('drawing','done','2');};
+ try{
+  await dispatchStageHandoffs(f.store,f.project,'test');assert.equal(sent.length,1);
+  await assert.rejects(act('site','done','4'),/assigned person/);
+  await act('site','done','1');assert.equal(sent.length,2);assert.match(sent[1].text,/tg:\/\/user\?id=2/);
+  await drawing(201);assert.equal(task('drawing').DrawingRevision,'1');assert.equal(sent.length,3);
+  await act('drawing','done','2');assert.equal(sent.length,3,'repeat drawing completion must not require another upload or send twice');
+  await act('internal','approve','3');await act('client','changes','4','Door position needs revision');
+  assert.equal(task('drawing').Status,'Ready');assert.equal(task('internal').ApprovedRevision,'');assert.equal(task('execution').Status,'Waiting');
+  await assert.rejects(act('drawing','done','2'),/drawing revision/);
+  await drawing(202);await act('internal','approve','3');await act('client','approve','4');
+  assert.equal(task('drawing').DrawingRevision,'2');assert.equal(task('client').ApprovedRevision,'2');assert.equal(task('execution').Status,'Ready');
+  const sendsBeforeHold=sent.length;await act('execution','hold','5','Site unavailable');
+  assert.equal(task('final').ForecastEnd,'');assert.match(task('final').BlockedReason,/held/);
+  await assert.rejects(act('execution','done','5'),/resume/);
+  await act('execution','resume','5');assert.equal(sent.length,sendsBeforeHold,'resume must not resend a previously delivered handoff');
+  await act('execution','done','5');await act('final','done','3');
+  assert.equal(f.data.Tasks.filter(t=>t.StageID==='civil'&&t.Status==='Completed').length,6);
+  const next=f.data.Tasks.find(t=>t.StageID==='electrical'&&t.StepKey==='site');assert.equal(next.Status,'Ready');assert.equal(next.NotificationState,'Sent');
+  const count=sent.length;await act('final','done','3');assert.equal(sent.length,count);
+ }finally{globalThis.fetch=original;}
+});

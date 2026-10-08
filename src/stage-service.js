@@ -24,7 +24,7 @@ export async function actOnStageTask(store,project,taskId,action,input){
   if(!member)throw new Error('Only an active project member can update linked tasks.');
   const tasks=await store.tasksForProject(project.ProjectID);
   const task=tasks.find(t=>t.TaskID===taskId);
-  if(action==='done' && task?.StepKey==='drawing'){const revision=String(Number(task.DrawingRevision||0)+1);const files=await store.rows('SubmittedResources');if(!files.some(file=>file.ProjectID===project.ProjectID && file.TaskID===taskId && file.Revision===revision))throw new Error('Submit the current drawing revision before completing it.');}
+  if(action==='done' && task?.StepKey==='drawing' && task.Status!=='Completed'){const revision=String(Number(task.DrawingRevision||0)+1);const files=await store.rows('SubmittedResources');if(!files.some(file=>file.ProjectID===project.ProjectID && file.TaskID===taskId && file.Revision===revision))throw new Error('Submit the current drawing revision before completing it.');}
   const transitioned=transitionStageTask(tasks,taskId,action,{actorId:input.actorId,founderId:project.LeaderTelegramID,reason:input.reason,today:new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'})});
   const next=forecastStageTasks(transitioned,JSON.parse(project.WorkflowConfigJSON),new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'}));
   const changes=[];
