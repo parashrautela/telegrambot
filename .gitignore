@@ -3,8 +3,3 @@
 tuckbox-design/
 frontend/node_modules/
 frontend/dist/
-
-data/
-*.sqlite
-*.sqlite-wal
-*.sqlite-shm
