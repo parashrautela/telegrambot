@@ -1,326 +1,149 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react"
-import {
-  Archive,
-  Bell,
-  Check,
-  ChevronDown,
-  CircleHelp,
-  FileText,
-  Hash,
-  ImagePlus,
-  Info,
-  MessageCircle,
-  MoreHorizontal,
-  Paperclip,
-  Plus,
-  Search,
-  Send,
-  Smile,
-  Users,
-  X,
-} from "lucide-react"
-import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Bubble, BubbleContent } from "@/components/ui/bubble"
-import {
-  Message,
-  MessageAvatar,
-  MessageContent,
-  MessageFooter,
-  MessageHeader,
-} from "@/components/ui/message"
-import { Button } from "@/components/ui/button"
-import { Separator } from "@/components/ui/separator"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { ArrowUpRight, ArrowLeft, ArrowRight, Bell, Check, ChevronRight, Clock3, Folder, History, Home, Link2, LogOut, Plus, Search, Send, Settings2, X } from 'lucide-react'
+import { api, ApiError, type Snapshot, type Task, type Thread, type Backtrack, type Intervention, type ProjectEvent } from './workspace-api'
+import { WorkspaceDialogs, fields, type ModalName } from './workspace-dialogs'
+import './workspace.css'
 
-type ChatMessage = {
-  id: number
-  author: string
-  initials: string
-  role: string
-  time: string
-  text: string
-  mine?: boolean
-  accent?: string
-  attachment?: { title: string; meta: string }
+const time = (v: string) => new Date(v).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+const date = (v: string) => v ? new Date(`${v}T00:00:00Z`).toLocaleDateString('en-IN', { timeZone: 'UTC', month: 'short', day: 'numeric' }) : 'Not scheduled'
+const shortName = (v: string) => v.split(' ').map(s => s[0]).slice(0, 2).join('')
+const safeUrl = (v: string) => { if (/^\/api\/workspace\/requests\/[^/]+\/attachments\/\d+$/.test(v)) return v; try { const u = new URL(v); return u.protocol === 'https:' && !u.username && !u.password ? u.href : undefined } catch { return undefined } }
+function Status({ value }: { value: string }) { return <span className={`status-pill ${value === 'Resolved' ? 'done' : /Blocked|review|Rework/.test(value) ? 'waiting' : ''}`}>{value === 'Resolved' ? 'Completed' : value === 'Open' ? 'Not started' : value}</span> }
+function Reference({ url, title }: { url: string; title: string }) {
+  const link = safeUrl(url); const [failed, setFailed] = useState(false)
+  const image = Boolean(link && (/\.(jpe?g|png|webp)(\?|$)/i.test(link) || link.startsWith('/api/workspace/requests/')))
+  return link ? <div className="reference"><a className="reference-link" href={link} target="_blank" rel="noreferrer"><Link2 size={16} />{title}<ArrowUpRight size={14} /></a>{image && <details><summary>Preview image</summary>{failed ? <p className="muted">Preview unavailable. Open the reference or check the original source.</p> : <a href={link} target="_blank" rel="noreferrer"><img className="evidence-preview" src={link} alt={title} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(true)} /></a>}</details>}</div> : <span>Reference unavailable</span>
 }
-
-const initialMessages: ChatMessage[] = [
-  {
-    id: 1,
-    author: "Maya Sharma",
-    initials: "MS",
-    role: "Client",
-    time: "9:18 AM",
-    text: "Good morning! The living room wall feels a little darker than we expected. Is that the final paint shade?",
-    accent: "bg-[#efe7db] text-[#78634c]",
-  },
-  {
-    id: 2,
-    author: "Aarav Mehta",
-    initials: "AM",
-    role: "Project lead",
-    time: "9:24 AM",
-    text: "Morning, Maya. This is the first coat, so it will look lighter once it dries. I’ll check it again this afternoon in natural light and share an update.",
-    accent: "bg-[#dce9e3] text-[#476657]",
-  },
-  {
-    id: 3,
-    author: "Maya Sharma",
-    initials: "MS",
-    role: "Client",
-    time: "9:31 AM",
-    text: "That sounds good, thank you. I also found the reference photo we discussed.",
-    accent: "bg-[#efe7db] text-[#78634c]",
-    attachment: { title: "living-room-reference.jpg", meta: "JPG · 2.4 MB" },
-  },
-  {
-    id: 4,
-    author: "You",
-    initials: "IK",
-    role: "Studio Iksha",
-    time: "9:42 AM",
-    text: "Thanks, Maya. We’ve added it to the project references. Aarav will compare it with the dried sample before we proceed with the second coat.",
-    mine: true,
-    accent: "bg-[#dce8e1] text-[#456454]",
-  },
-]
-
-const projects = [
-  { name: "Parash ka Ghar", place: "Bandra, Mumbai", initials: "PG", unread: 2, color: "bg-[#e9e3d9] text-[#79674f]" },
-  { name: "Mehta Residence", place: "Juhu, Mumbai", initials: "MR", unread: 0, color: "bg-[#e6e6da] text-[#686b4c]" },
-  { name: "Nishank House", place: "Pune, Maharashtra", initials: "NH", unread: 0, color: "bg-[#e4e9ed] text-[#516477]" },
-  { name: "The Olive Studio", place: "Andheri, Mumbai", initials: "OS", unread: 0, color: "bg-[#eee1dd] text-[#8a6258]" },
-]
-
-const projectThreads: Record<string, ChatMessage[]> = {
-  "Parash ka Ghar": initialMessages,
-  "Mehta Residence": [
-    { id: 11, author: "Nisha Mehta", initials: "NM", role: "Client", time: "Yesterday", text: "Could we move the dining pendant slightly toward the center of the table?", accent: "bg-[#efe7db] text-[#78634c]" },
-    { id: 12, author: "Neha Shah", initials: "NS", role: "Interior designer", time: "Yesterday", text: "Absolutely. I’ve updated the reflected ceiling plan and shared the revised drawing in the files tab.", accent: "bg-[#e4e9ed] text-[#516477]", attachment: { title: "ceiling-plan-rev-b.pdf", meta: "PDF · 860 KB" } },
-    { id: 13, author: "You", initials: "IK", role: "Studio Iksha", time: "Yesterday", text: "The electrician has the updated plan and will confirm the new point during tomorrow’s site visit.", mine: true, accent: "bg-[#dce8e1] text-[#456454]" },
-  ],
-  "Nishank House": [
-    { id: 21, author: "Dev Nishank", initials: "DN", role: "Client", time: "10:12 AM", text: "We’ve approved the stone sample for the entrance. Please go ahead with this one.", accent: "bg-[#e4e9ed] text-[#516477]" },
-    { id: 22, author: "Rohan Kulkarni", initials: "RK", role: "Site supervisor", time: "10:19 AM", text: "Noted. I’ve marked the sample approved and shared it with the stone contractor.", accent: "bg-[#e6e6da] text-[#686b4c]" },
-  ],
-  "The Olive Studio": [
-    { id: 31, author: "Tara Iyer", initials: "TI", role: "Client", time: "9:54 AM", text: "The joinery team asked which handle finish we chose for the reception desk. Is it brushed brass?", accent: "bg-[#eee1dd] text-[#8a6258]" },
-    { id: 32, author: "Aarav Mehta", initials: "AM", role: "Project lead", time: "10:02 AM", text: "Yes, brushed brass. I’m sharing the approved specification sheet here so the team has the exact finish code.", accent: "bg-[#dce9e3] text-[#476657]", attachment: { title: "joinery-specification.pdf", meta: "PDF · 1.2 MB" } },
-  ],
+function Panel({ title, close, children }: { title: string; close: () => void; children: ReactNode }) {
+  const ref = useRef<HTMLDialogElement>(null)
+  useEffect(() => { const el = ref.current; const previous = document.activeElement as HTMLElement; el?.showModal(); return () => { el?.close(); previous?.focus() } }, [])
+  return <dialog ref={ref} className="focus-panel" onCancel={close}><header className="panel-header"><span>{title}</span><button className="icon-button" onClick={close} aria-label="Close panel"><X size={20} /></button></header>{children}</dialog>
 }
 
 function App() {
-  const [activeProject, setActiveProject] = useState(projects[0])
-  const [threads, setThreads] = useState(projectThreads)
-  const [draft, setDraft] = useState("")
-  const [query, setQuery] = useState("")
-  const [showDetails, setShowDetails] = useState(false)
-  const messages = threads[activeProject.name] ?? []
-  const scrollContainerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const container = scrollContainerRef.current
-    if (container) container.scrollTop = container.scrollHeight
-  }, [messages, activeProject.name])
-
-  const filteredProjects = useMemo(
-    () => projects.filter((project) => project.name.toLowerCase().includes(query.toLowerCase())),
-    [query],
-  )
-
-  function sendMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    const text = draft.trim()
-    if (!text) return
-    const now = new Date()
-    const message: ChatMessage = {
-        id: Date.now(),
-        author: "You",
-        initials: "IK",
-        role: "Studio Iksha",
-        time: now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
-        text,
-        mine: true,
-        accent: "bg-[#dce8e1] text-[#456454]",
-      }
-    setThreads((current) => ({
-      ...current,
-      [activeProject.name]: [...(current[activeProject.name] ?? []), message],
-    }))
-    setDraft("")
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [projectId, setProjectId] = useState(new URLSearchParams(location.search).get('project') || '')
+  const [taskId, setTaskId] = useState(new URLSearchParams(location.search).get('thread') || '')
+  const [view, setView] = useState<'Now' | 'Plan' | 'History'>('Now')
+  const [search, setSearch] = useState('')
+  const [queue, setQueue] = useState(false)
+  const [interventionId, setInterventionId] = useState('')
+  const [backtrack, setBacktrack] = useState<Backtrack | null>(null)
+  const [thread, setThread] = useState<Thread | null>(null)
+  const [modal, setModal] = useState<ModalName>(null)
+  const [team, setTeam] = useState(false)
+  const [disableId, setDisableId] = useState('')
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [replyOpen, setReplyOpen] = useState(false)
+  const [olderHistory, setOlderHistory] = useState<ProjectEvent[]>([])
+  const [historyExhausted, setHistoryExhausted] = useState(false)
+  const [checkpoint, setCheckpoint] = useState(Number(sessionStorage.getItem('iksha-catchup') || 0))
+  const refreshSequence = useRef(0)
+  const lock = useRef(false)
+  const replyKeys = useRef<Record<string, { body: string; key: string }>>({})
+  const fail = useCallback((e: unknown) => {
+    if (e instanceof DOMException && e.name === 'AbortError') return
+    if (e instanceof ApiError && e.status === 401) { refreshSequence.current++; setSnapshot(null); setThread(null); setBacktrack(null); setDrafts({}); setTaskId(''); setInterventionId(''); setQueue(false); setModal(null); setTeam(false) }
+    setError(e instanceof Error ? e.message : 'Something went wrong. Please try again.')
+  }, [])
+  const refresh = useCallback(async () => { const seq = ++refreshSequence.current; const data = await api<Snapshot>(); if (seq === refreshSequence.current) setSnapshot(data) }, [])
+  useEffect(() => { void refresh().catch(e => { if (!(e instanceof ApiError && e.status === 401)) fail(e) }).finally(() => setLoading(false)) }, [refresh, fail])
+  useEffect(() => { if (!snapshot) return; const timer = setInterval(() => { if (document.visibilityState === 'visible') void refresh().catch(fail) }, 8000); return () => clearInterval(timer) }, [Boolean(snapshot), refresh, fail])
+  const perform = async (work: () => Promise<unknown>, close = true) => {
+    if (lock.current) return; lock.current = true; setBusy(true); setError('')
+    try { await work(); await refresh(); if (close) setModal(null) } catch (e) { fail(e) } finally { lock.current = false; setBusy(false) }
   }
+  const navigate = (p: string, t = '') => { setProjectId(p); setTaskId(t); setView('Now'); setTeam(false); setError('') }
+  useEffect(() => { const s = new URLSearchParams(); if (projectId) s.set('project', projectId); if (taskId) s.set('thread', taskId); history.replaceState(null, '', `${location.pathname}${s.size ? `?${s}` : ''}`) }, [projectId, taskId])
+  useEffect(() => {
+    if (!taskId || !snapshot) { setThread(null); return }
+    const controller = new AbortController()
+    void api<Thread>(`/tasks/${taskId}`, 'GET', undefined, controller.signal).then(setThread).catch(fail)
+    return () => controller.abort()
+  }, [taskId, snapshot, fail])
+  useEffect(() => {
+    if (!interventionId || !snapshot) { setBacktrack(null); return }
+    const controller = new AbortController()
+    void api<Backtrack>(`/interventions/${interventionId}/backtrack`, 'GET', undefined, controller.signal).then(setBacktrack).catch(fail)
+    return () => controller.abort()
+  }, [interventionId, snapshot, fail])
+  const openItem = (i: Intervention) => { setTaskId(''); setBacktrack(null); setInterventionId(i.id); setQueue(true); setReplyOpen(false); setOlderHistory([]); setHistoryExhausted(false); setError(''); if (!i.readAt) void perform(() => api(`/interventions/${i.id}/action`, 'POST', { action: 'read', version: i.version }), false) }
+  if (loading) return <div className="boot-state">Opening your workspace…</div>
+  if (!snapshot) return <div className="login-screen"><div className="login-brand">iksha<span>WORKSPACE</span></div><form className="login-card" onSubmit={e => { e.preventDefault(); const input = fields(e); void perform(async () => { await api('/login', 'POST', input) }) }}><span className="eyebrow">A LITTLE CLARITY, EVERY DAY</span><h1>Your work.<br />All together.</h1><p>Sign in to pick up where you left off.</p><label>Staff ID<input name="id" autoComplete="username" required autoFocus /></label><label>Password<input name="password" type="password" autoComplete="current-password" required /></label>{error && <p role="alert" className="form-error">{error}</p>}<button className="primary-button" disabled={busy}>{busy ? 'Signing in…' : 'Continue'}<ArrowRight size={18} /></button></form><span className="login-foot">Studio Iksha · Team workspace</span></div>
 
-  return (
-    <main className="app-shell flex h-dvh min-h-[620px] overflow-hidden bg-background text-foreground">
-      <aside className="workspace-sidebar hidden w-[278px] shrink-0 flex-col border-r border-border/80 bg-[#fbfaf8] md:flex">
-        <div className="flex h-[72px] items-center gap-3 px-5">
-          <div className="brand-mark flex size-9 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-            <span className="font-serif text-lg">i</span>
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="text-[13px] font-semibold tracking-tight">Studio Iksha</p>
-            <p className="text-[11px] text-muted-foreground">Project workspace</p>
-          </div>
-          <Button variant="ghost" size="icon" aria-label="Workspace options" className="size-8 text-muted-foreground">
-            <ChevronDown className="size-4" />
-          </Button>
-        </div>
-        <Separator />
+  const founder = snapshot.user.role === 'Founder'
+  const project = snapshot.projects.find(p => p.id === projectId)
+  const tasks = snapshot.tasks.filter(t => t.projectId === projectId)
+  const activeTask = snapshot.tasks.find(t => t.id === taskId)
+  const editable = founder || activeTask?.ownerId === snapshot.user.id
+  const item = snapshot.interventions.find(i => i.id === interventionId)
+  const draftKey = queue && item ? `reply-${item.id}` : `task-${taskId}`
+  const draft = drafts[draftKey] || ''
+  const setDraft = (text: string) => setDrafts(old => ({ ...old, [draftKey]: text }))
+  const pending = snapshot.interventions
+  const events = snapshot.events.filter(e => e.seq > checkpoint)
+  const acknowledge = () => { const value = snapshot.events[0]?.seq || 0; sessionStorage.setItem('iksha-catchup', String(value)); setCheckpoint(value) }
+  const taskRow = (t: Task) => <button className="work-row" key={t.id} onClick={() => { setInterventionId(''); setProjectId(t.projectId); setThread(null); setTaskId(t.id); setError('') }}><span className={`work-mark ${t.status === 'Resolved' ? 'finished' : ''}`}>{t.status === 'Resolved' ? <Check size={15} /> : <span />}</span><span className="work-copy"><strong>{t.title}</strong><small>{t.dependencyBlocker || t.blocker || t.nextAction || 'Review the brief and agree on the next step.'}</small></span><span className="work-person">{t.externalName || t.ownerName || 'Unassigned'}</span><Status value={t.status} /><ChevronRight size={16} /></button>
+  const showError = error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" onClick={() => setError('')} aria-label="Dismiss error"><X size={16} /></button></div>
 
-        <div className="space-y-1 px-3 py-4">
-          <button className="nav-item nav-active flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[13px] font-medium">
-            <MessageCircle className="size-4" /> <span className="flex-1">Messages</span>
-            <span className="rounded-full bg-white/75 px-2 py-0.5 text-[10px]">2</span>
-          </button>
-          <button className="nav-item flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[13px] text-muted-foreground">
-            <Users className="size-4" /> <span className="flex-1">People</span>
-          </button>
-          <button className="nav-item flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-[13px] text-muted-foreground">
-            <Archive className="size-4" /> <span className="flex-1">Files & resources</span>
-          </button>
-        </div>
+  return <main className="studio-app">
+    <aside className="studio-nav"><button className="brand" onClick={() => navigate('')}>iksha<span>WORKSPACE</span></button><nav><button className={!projectId ? 'selected' : ''} onClick={() => navigate('')}><Home size={18} />Home</button><span className="nav-label">PROJECTS</span>{snapshot.projects.slice(0, 8).map(p => <button key={p.id} className={projectId === p.id ? 'selected' : ''} onClick={() => navigate(p.id)}><Folder size={17} /><span>{p.name}</span>{pending.some(i => i.projectId === p.id) && <i className="nav-dot" />}</button>)}</nav><div className="nav-bottom">{founder && <button onClick={() => setModal('employee')}><Plus size={16} />Add team member</button>}<div className="account"><span className="avatar">{shortName(snapshot.user.name)}</span><span><strong>{founder ? 'Gosik & Nishank' : snapshot.user.name}</strong><small>{founder ? 'Founder workspace' : snapshot.user.role}</small></span><button className="icon-button" aria-label="Sign out" onClick={() => { void perform(async () => { await api('/logout', 'POST', {}); refreshSequence.current++; setSnapshot(null); setDrafts({}); setTaskId(''); setInterventionId(''); setQueue(false); setTeam(false); setModal(null) }, false) }}><LogOut size={16} /></button></div></div></aside>
+    <section className="studio-main"><header className="top-bar"><div className="breadcrumbs"><button onClick={() => navigate('')}>Workspace</button>{project && <><ChevronRight size={14} /><span>{project.name}</span></>}</div>{founder && <button className={`intervention-badge ${pending.length ? 'has-items' : ''}`} onClick={() => { setQueue(true); setInterventionId(''); setTaskId(''); setError('') }}><Bell size={16} /><span>Instant interference from the founders</span><b>{pending.length}</b></button>}</header>
+      <div className="page-content">{showError}
+      {!project ? <>
+        <div className="hero"><div><span className="eyebrow">STUDIO IKSHA / {founder ? 'FOUNDERS' : 'TEAM'}</span><h1>A clear view.<br /><span>A good place to start.</span></h1><p>{founder ? 'Your projects, the next steps, and the things that need you.' : 'Your assigned work and the context to move it forward.'}</p></div>{founder && <button className="primary-button" onClick={() => setModal(snapshot.clients.length ? 'project' : 'client')}><Plus size={17} />New project</button>}</div>
+        {founder && pending.length > 0 && <button className="attention-strip" onClick={() => { setQueue(true); setTaskId('') }}><span className="attention-icon"><Bell size={18} /></span><span><strong>{pending.length === 1 ? 'One thing needs you.' : `${pending.length} things need you.`}</strong><small>Questions and work ready for your review.</small></span><span className="strip-link">Take a look<ArrowRight size={17} /></span></button>}
+        <div className="section-heading"><h2>{founder ? 'Your projects' : 'Your work'}</h2><label className="quiet-search"><Search size={16} /><input aria-label="Find a project" placeholder="Find a project" value={search} onChange={e => setSearch(e.target.value)} /></label></div>
+        <div className="project-grid">{snapshot.projects.filter(p => `${p.name} ${p.clientName}`.toLowerCase().includes(search.toLowerCase())).map((p, index) => {
+          const work = snapshot.tasks.filter(t => t.projectId === p.id); const finished = work.filter(t => t.status === 'Resolved').length; const issueCount = pending.filter(i => i.projectId === p.id).length
+          const current = work.find(t => t.status === 'In progress') || work.find(t => t.status === 'Awaiting review') || work.find(t => !t.dependencyBlocker && t.status !== 'Resolved')
+          return <button className="project-card" key={p.id} onClick={() => navigate(p.id)}><div className={`project-art art-${index % 3}`} aria-hidden="true"><div className="arch-shape" /><div className="building-line" /><span>0{index + 1}</span></div><div className="project-card-body"><div className="card-topline"><span>{p.location || p.clientName}</span>{issueCount > 0 ? <span className="attention-label">{issueCount} need you</span> : <span>{p.status}</span>}</div><h3>{p.name}<ArrowUpRight size={20} /></h3><p>{current?.title || 'Ready to set up the work plan.'}</p><div className="progress-track"><i style={{ width: `${work.length ? finished / work.length * 100 : 0}%` }} /></div><footer><span>{finished} of {work.length} complete</span><span>{work.length ? 'Open project' : 'Set up project'}<ChevronRight size={13} /></span></footer></div></button>
+        })}</div>{!snapshot.projects.length && <div className="empty-note"><Folder size={24} /><h3>Your first project starts here.</h3><p>Add a client and create the work plan.</p></div>}
+        {!founder && <div className="section-block"><h2>Assigned to you</h2>{snapshot.tasks.filter(t => t.ownerId === snapshot.user.id && t.status !== 'Resolved').map(taskRow)}</div>}
+        <section className="catchup"><div className="section-heading"><div><span className="eyebrow">PICK UP WHERE YOU LEFT OFF</span><h2>{checkpoint ? 'Since you caught up' : 'Recent changes'}</h2></div>{events.length > 0 && <button className="text-button" onClick={acknowledge}>Caught up<Check size={15} /></button>}</div>{events.slice(0, 4).map(e => <button key={e.seq} className="event-row" onClick={() => navigate(e.projectId, e.taskId || '')}><span className="event-dot" /><span><strong>{snapshot.projects.find(p => p.id === e.projectId)?.name}</strong><p>{e.body}</p></span><time>{time(e.createdAt)}</time></button>)}{!events.length && <p className="muted">You're caught up. New decisions and progress will appear here.</p>}</section>
+      </> : <>
+        <div className="project-hero"><button className="text-button" onClick={() => navigate('')}><ArrowLeft size={16} />All projects</button><div className="project-title-row"><div><span className="eyebrow">{project.clientName} {project.location && ` / ${project.location}`}</span><h1>{project.name}</h1></div><button className="icon-button" onClick={() => setTeam(true)} aria-label="Project people and settings"><Settings2 size={20} /></button></div><p>{project.status === 'Setup' ? 'Bring the right people in. Then start the work plan.' : `${tasks.filter(t => t.status === 'Resolved').length} of ${tasks.length} pieces of work complete.`}</p></div>
+        <div className="project-toolbar"><nav>{(['Now', 'Plan', 'History'] as const).map(v => <button key={v} className={v === view ? 'selected' : ''} onClick={() => setView(v)}>{v}</button>)}</nav>{founder && <button className="text-button" onClick={() => setModal(project.status === 'Setup' ? 'activate' : 'task')}><Plus size={16} />{project.status === 'Setup' ? 'Start work plan' : 'Add work'}</button>}</div>
+        {view === 'Now' && <><div className="project-summary"><span className="summary-symbol"><Folder size={22} /></span><div><h2>{pending.some(i => i.projectId === projectId) ? 'Your team is waiting for a little direction.' : project.status === 'Setup' ? 'A fresh start.' : 'Keep the next step clear.'}</h2><p>{pending.filter(i => i.projectId === projectId).length ? 'Open an item below to answer or review it.' : 'Open any work to see its brief, people, and references.'}</p></div></div>{pending.filter(i => i.projectId === projectId).map(i => <button className="inline-intervention" key={i.id} onClick={() => openItem(i)}><Bell size={17} /><span><strong>{i.sender}</strong><small>{i.body}</small></span><ChevronRight size={17} /></button>)}<div className="section-block"><h2>Current work</h2>{tasks.filter(t => !['Open', 'Resolved'].includes(t.status)).map(taskRow)}{!tasks.some(t => !['Open', 'Resolved'].includes(t.status)) && <p className="muted">No work in progress yet. Choose a ready task below.</p>}</div><div className="section-block"><h2>Coming next</h2>{tasks.filter(t => t.status === 'Open' && !t.dependencyBlocker).slice(0, 5).map(taskRow)}{!tasks.some(t => t.status === 'Open' && !t.dependencyBlocker) && <p className="muted">The next work will appear when its prerequisites are ready.</p>}</div><details className="section-block"><summary>Full work plan · {tasks.filter(t => t.status === 'Open').length} upcoming</summary>{tasks.filter(t => t.status === 'Open').map(taskRow)}</details>{tasks.some(t => t.status === 'Resolved') && <details className="section-block"><summary>Completed work</summary>{tasks.filter(t => t.status === 'Resolved').map(taskRow)}</details>}</>}
+        {view === 'Plan' && <Timeline tasks={tasks} busy={busy} open={setTaskId} move={(t, start) => perform(() => api(`/tasks/${t.id}/plan`, 'POST', { version: t.version, brief: t.brief, externalName: t.externalName, externalTelegramId: t.externalTelegramId, durationDays: t.durationDays, notBefore: start }), false)} founder={founder} />}
+        {view === 'History' && <section className="section-block"><h2>Project history</h2>{snapshot.events.filter(e => e.projectId === projectId).map(e => <article className="history-event" key={e.seq}><span>{e.kind}</span><p>{e.body}</p><small>{e.actor} · {time(e.createdAt)}</small></article>)}<p className="muted">History includes recorded changes. Unrecorded conversations won't appear here.</p></section>}
+      </>}
+      </div>
+    </section>
 
-        <div className="mt-2 flex items-center justify-between px-5 pb-2">
-          <p className="section-label">PROJECT CHATS</p>
-          <Button variant="ghost" size="icon" aria-label="Add project" className="size-7 text-muted-foreground">
-            <Plus className="size-4" />
-          </Button>
-        </div>
-        <label className="search-field mx-4 mb-2 flex h-9 items-center gap-2 rounded-lg border border-border/70 bg-white px-2.5">
-          <Search className="size-3.5 text-muted-foreground" />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a project" className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground/70" />
-          <span className="rounded border border-border px-1 text-[9px] text-muted-foreground">⌘ K</span>
-        </label>
+    {queue && <Panel title={interventionId ? 'Founder attention' : 'Things that need you'} close={() => { setQueue(false); setInterventionId(''); setError('') }}><div className="panel-body">{showError}{!interventionId ? <><h2>A little direction<br />goes a long way.</h2><p className="muted">Seen items stay here until they're handled.</p>{pending.map(i => <button className="queue-item" key={i.id} onClick={() => openItem(i)}><div><span>{snapshot.projects.find(p => p.id === i.projectId)?.name}</span>{!i.readAt && <b className="new-dot" />}</div><h3>{i.sender}</h3><p>{i.body}</p><footer><small>{i.owner || 'Either founder can handle this'}</small><ChevronRight size={16} /></footer></button>)}{!pending.length && <div className="empty-note"><Check size={28} /><h3>Nothing waiting on you.</h3><p>Questions and reviews will appear here.</p></div>}</> : item && backtrack?.item.id === item.id ? <>
+      <button className="text-button" onClick={() => setInterventionId('')}><ArrowLeft size={15} />All items</button><span className="eyebrow panel-eyebrow">{snapshot.projects.find(p => p.id === item.projectId)?.name}</span><h2>{item.kind === 'Review' ? 'Ready for your review.' : `${item.sender} needs a little clarity.`}</h2><div className="question-bubble"><p>{item.body}</p><small>{item.sender} · {time(item.createdAt)}</small></div>
+      <div className="owner-buttons">{['Gosik', 'Nishank'].map(owner => <button key={owner} className={item.owner === owner ? 'assigned' : ''} disabled={busy} onClick={() => { void perform(() => api(`/interventions/${item.id}/action`, 'POST', { action: 'assign', owner, version: item.version }), false) }}>{item.owner === owner ? <Check size={14} /> : <Plus size={14} />}Assign to {owner}</button>)}</div>
+      {!item.taskId && <form className="inline-form" onSubmit={e => { e.preventDefault(); const input = fields(e); void perform(() => api(`/interventions/${item.id}/action`, 'POST', { ...input, action: 'link', version: item.version }), false) }}><label>Which work is this about?<select name="taskId" required defaultValue=""><option value="" disabled>Select relevant work</option>{snapshot.tasks.filter(t => t.projectId === item.projectId).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></label><button className="secondary-button" disabled={busy}>Link work</button></form>}
+      <details className="backtrack"><summary><History size={17} />Backtrack<span>Recover the context<ChevronRight size={15} /></span></summary>{backtrack.task ? <div className="backtrack-content"><span className="eyebrow">THE ORIGINAL WORK</span><h3>{backtrack.task.title}</h3><p>{backtrack.task.brief || backtrack.task.nextAction}</p><small>Assigned {time(backtrack.task.createdAt)} · {backtrack.task.externalName || backtrack.task.ownerId}</small>{backtrack.resources.map(r => <Reference key={r.id} url={r.url} title={`${r.title} · ${r.state}`} />)}<h4>Recent relevant discussion</h4>{backtrack.conversation.map(m => <article className="context-message" key={m.id}><strong>{m.authorName}<time>{time(m.createdAt)}</time></strong><small>{m.visibility}</small><p>{m.body}</p></article>)}{!backtrack.conversation.length && <p className="muted">No prior linked discussion has been recorded.</p>}<details><summary>Recorded history</summary>{[...backtrack.history, ...olderHistory].map(e => <article key={e.seq} className="history-event"><p>{e.body}</p><small>{time(e.createdAt)}</small></article>)}{backtrack.history.length >= 30 && !historyExhausted && <button className="text-button" disabled={busy} onClick={() => { void perform(async () => { const before = olderHistory.at(-1)?.seq || backtrack.history.at(-1)?.seq; const page = await api<ProjectEvent[]>(`/tasks/${backtrack.task!.id}/history?before=${before}`); setOlderHistory(old => [...old, ...page]); setHistoryExhausted(page.length < 30) }, false) }}>Load earlier history</button>}</details></div> : <p>Link this question to work to recover its context.</p>}</details>
+      {backtrack.request?.attachments.map((a, index) => a.url ? <Reference key={index} url={a.url} title={a.fileName || 'Attached reference'} /> : <Reference key={index} url={`/api/workspace/requests/${encodeURIComponent(backtrack.request!.id)}/attachments/${index}`} title={a.fileName || `Open ${a.type.toLowerCase()}`} />)}
+      {item.kind === 'Review' && item.taskId ? <button className="primary-button full-width" onClick={() => { navigate(item.projectId, item.taskId!); setQueue(false); setInterventionId('') }}>Compare and review work<ArrowRight size={16} /></button> : <><button className="primary-button full-width" onClick={() => setReplyOpen(!replyOpen)}><Send size={16} />{replyOpen ? 'Close reply' : 'Reply'}</button>{replyOpen && <form className="reply-form" onSubmit={e => { e.preventDefault(); const previous = replyKeys.current[item.id]; const key = previous?.body === draft ? previous.key : crypto.randomUUID(); replyKeys.current[item.id] = { body: draft, key }; void perform(async () => { await api(`/interventions/${item.id}/replies`, 'POST', { body: draft, intentKey: key }); setDraft('') }, false) }}><label>Your reply<textarea required rows={4} maxLength={4000} value={draft} onChange={e => setDraft(e.target.value)} /></label><p className="muted">Send to {snapshot.projects.find(p => p.id === item.projectId)?.name}'s Telegram group. Internal discussion stays private.</p><button className="primary-button" disabled={busy || backtrack.request?.source !== 'Telegram'}>Send to Telegram<Send size={15} /></button>{backtrack.request?.source !== 'Telegram' && <small className="muted">This manually recorded item has no Telegram destination.</small>}</form>}
+      {backtrack.replies.map(r => <div className="delivery-card" key={r.id}><Status value={r.state} /><p>{r.body}</p>{r.error && <p className="form-error">{r.error}</p>}{r.state === 'Failed' && <button className="text-button" disabled={busy} onClick={() => { void perform(() => api(`/replies/${r.id}/retry`, 'POST', {}), false) }}>Retry this reply</button>}{['Unknown', 'Failed'].includes(r.state) && <button className="text-button" disabled={busy} onClick={() => { void perform(() => api(`/replies/${r.id}/reconcile`, 'POST', { state: 'Sent', note: 'Founder checked delivery in Telegram.' }), false) }}>I checked Telegram: delivered</button>}</div>)}
+      <details className="resolve-details"><summary>Mark handled</summary><form onSubmit={e => { e.preventDefault(); void perform(async () => { await api(`/interventions/${item.id}/action`, 'POST', { ...fields(e), action: 'resolve', version: item.version }); setInterventionId('') }, false) }}><label>What was done?<input name="note" required maxLength={2000} /></label><button className="secondary-button" disabled={busy}>Mark handled<Check size={15} /></button></form></details></>}
+      </> : <p className="muted">{item ? 'Loading the context…' : 'This item has been handled. Return to the queue.'}</p>}</div></Panel>}
 
-        <nav className="flex-1 space-y-1 overflow-y-auto px-2 pb-4" aria-label="Project conversations">
-          {filteredProjects.map((project) => (
-            <button
-              key={project.name}
-              onClick={() => setActiveProject(project)}
-              className={`project-row flex w-full items-center gap-3 rounded-xl px-2.5 py-3 text-left transition-colors ${activeProject.name === project.name ? "project-active" : "hover:bg-black/[0.035]"}`}
-            >
-              <Avatar className={`size-9 rounded-xl ${project.color}`}><AvatarFallback className={`rounded-xl text-[11px] font-semibold ${project.color}`}>{project.initials}</AvatarFallback></Avatar>
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center justify-between gap-2">
-                  <span className="truncate text-[12px] font-medium">{project.name}</span>
-                  {project.unread > 0 && <span className="size-1.5 rounded-full bg-primary" />}
-                </span>
-                <span className="mt-1 block truncate text-[10px] text-muted-foreground">{project.place}</span>
-              </span>
-            </button>
-          ))}
-          {filteredProjects.length === 0 && <p className="px-3 py-5 text-xs text-muted-foreground">No matching projects</p>}
-        </nav>
+    {activeTask && <Panel title="Project work" close={() => { setTaskId(''); setError('') }}><div className="panel-body">{showError}<span className="eyebrow">{snapshot.projects.find(p => p.id === activeTask.projectId)?.name} / {activeTask.stage}</span><h2>{activeTask.title}</h2><div className="work-meta"><Status value={activeTask.status} /><span>{activeTask.externalName || activeTask.ownerName || 'Unassigned'}</span></div><p className="task-brief">{activeTask.brief || activeTask.nextAction}</p>{(activeTask.dependencyBlocker || activeTask.blocker) && <div className="waiting-note"><Clock3 size={17} />{activeTask.dependencyBlocker || activeTask.blocker}</div>}
+      {editable && activeTask.status === 'Open' && <button className="primary-button" disabled={busy || Boolean(activeTask.dependencyBlocker)} onClick={() => { void perform(() => api(`/tasks/${activeTask.id}`, 'PATCH', { status: 'In progress', version: activeTask.version }), false) }}>Start work<ArrowRight size={16} /></button>}
+      <section className="detail-section"><h3>What you need</h3>{snapshot.requirements.filter(r => r.taskId === activeTask.id).map(r => <label className="requirement" key={r.id}><input type="checkbox" checked={Boolean(r.verified)} disabled={!founder || busy} onChange={e => { void perform(() => api(`/tasks/${activeTask.id}/requirements`, 'POST', { id: r.id, verified: e.target.checked }), false) }} />{r.title}</label>)}{snapshot.resources.filter(r => r.taskId === activeTask.id).map(r => <div className="resource-row" key={r.id}><Reference url={r.url} title={`${r.title} · ${r.state}`} />{founder && r.state !== 'Approved' && <button className="text-button" disabled={busy} onClick={() => { void perform(() => api(`/resources/${r.id}/approve`, 'POST', {}), false) }}>Approve</button>}</div>)}{!snapshot.resources.some(r => r.taskId === activeTask.id) && <p className="muted">No references linked yet.</p>}{editable && <details><summary>Add a reference</summary><form onSubmit={e => { e.preventDefault(); const input = fields(e); const form = e.currentTarget; void perform(async () => { await api(`/tasks/${activeTask.id}/resources`, 'POST', input); form.reset() }, false) }}><label>Name<input name="title" required /></label><label>File or image link<input name="url" required type="url" placeholder="https://…" /></label><label>Use<select name="purpose"><option>Drawing</option><option>Input</option></select></label><button className="secondary-button" disabled={busy}>Add reference</button></form></details>}{founder && <details><summary>Add required input</summary><form onSubmit={e => { e.preventDefault(); const form = e.currentTarget; const input = fields(e); void perform(async () => { await api(`/tasks/${activeTask.id}/requirements`, 'POST', input); form.reset() }, false) }}><label>What is needed?<input name="title" required /></label><button className="secondary-button" disabled={busy}>Add requirement</button></form></details>}</section>
+      <section className="detail-section"><h3>Recent discussion</h3>{thread?.task.id === activeTask.id ? thread.messages.map(m => <article className="context-message" key={m.seq}><strong>{m.authorName}<time>{time(m.createdAt)}</time></strong><p>{m.body}</p>{m.attachmentUrl && <Reference url={m.attachmentUrl} title="Reference" />}</article>) : <p className="muted">Loading discussion…</p>}{editable && activeTask.status !== 'Resolved' && <form className="message-form" onSubmit={e => { e.preventDefault(); void perform(async () => { await api(`/tasks/${activeTask.id}/messages`, 'POST', { body: draft }); setDraft('') }, false) }}><textarea aria-label="Internal team update" placeholder="An update, question, or next step…" rows={2} required value={draft} onChange={e => setDraft(e.target.value)} maxLength={10000} /><footer><small>Internal team only</small><button className="send-button" disabled={busy} aria-label="Post internal update"><ArrowUpRight size={18} /></button></footer></form>}</section>
+      <section className="detail-section"><h3>Completion & review</h3>{snapshot.submissions.filter(s => s.taskId === activeTask.id).map(s => <div className="submission" key={s.id}><Reference url={s.evidenceUrl} title="Open completion photo" /><p>{s.note}</p><Status value={s.status} />{s.feedback && <p>{s.feedback}</p>}{founder && s.status === 'Pending' && <><button className="primary-button" disabled={busy} onClick={() => { void perform(() => api(`/submissions/${s.id}/review`, 'POST', { outcome: 'Approved' }), false) }}>Approve completed work<Check size={16} /></button><form onSubmit={e => { e.preventDefault(); void perform(() => api(`/submissions/${s.id}/review`, 'POST', { ...fields(e), outcome: 'Changes requested' }), false) }}><label>What needs correction?<textarea name="feedback" required rows={2} /></label><button className="secondary-button" disabled={busy}>Request changes</button></form></>}</div>)}{editable && !['Awaiting review', 'Resolved'].includes(activeTask.status) && <details><summary>Submit work for review</summary><form onSubmit={e => { e.preventDefault(); void perform(() => api(`/tasks/${activeTask.id}/submit`, 'POST', fields(e)), false) }}><label>Completion photo link<input name="evidenceUrl" type="url" required placeholder="https://…" /></label><label>What was completed?<textarea name="note" rows={2} /></label><button className="primary-button" disabled={busy}>Submit to founders<ArrowRight size={16} /></button></form></details>}</section>
+      {editable && <details className="detail-section"><summary>Dates & work details</summary><div className="date-pair"><span>Current plan<strong>{date(activeTask.forecastStart)} — {date(activeTask.forecastEnd)}</strong></span><span>Original plan<strong>{date(activeTask.baselineStart)} — {date(activeTask.baselineEnd)}</strong></span></div>{activeTask.unscheduledReason && <p className="muted">{activeTask.unscheduledReason}</p>}{founder && <form key={activeTask.version} onSubmit={e => { e.preventDefault(); void perform(() => api(`/tasks/${activeTask.id}/plan`, 'POST', { ...fields(e), version: activeTask.version }), false) }}><label>Instructions<textarea name="brief" rows={3} defaultValue={activeTask.brief} /></label><label>External worker name<input name="externalName" defaultValue={activeTask.externalName} /></label><label>External worker Telegram ID<input name="externalTelegramId" defaultValue={activeTask.externalTelegramId} inputMode="numeric" /></label><div className="form-grid"><label>Duration (calendar days)<input name="durationDays" type="number" min={1} max={3650} defaultValue={activeTask.durationDays || ''} /></label><label>Start no earlier than<input name="notBefore" type="date" defaultValue={activeTask.notBefore} /></label></div><label>Also waits for <span className="muted">optional</span><select name="addPredecessor" defaultValue=""><option value="">Keep current prerequisites</option>{snapshot.tasks.filter(t => t.projectId === activeTask.projectId && t.id !== activeTask.id).map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></label><button className="secondary-button" disabled={busy}>Save work plan</button></form>}<form onSubmit={e => { e.preventDefault(); void perform(() => api(`/tasks/${activeTask.id}/delay`, 'POST', { ...fields(e), version: activeTask.version }), false) }}><h4>Report a delay</h4><label>Extra calendar days<input name="days" type="number" min={1} max={365} required /></label><label>Reason<input name="reason" required placeholder="For example, site access affected by rain" /></label><p className="muted">Dependent work updates automatically. Independent work can continue.</p><button className="secondary-button" disabled={busy}>Record delay</button></form></details>}
+      {editable && <button className="text-button" onClick={() => setModal('summary')}>Update owner or next action<Settings2 size={15} /></button>}
+    </div></Panel>}
 
-        <div className="mx-3 mb-3 rounded-xl border border-border/70 bg-white p-3">
-          <div className="flex items-start gap-2.5">
-            <div className="mt-0.5 rounded-md bg-[#f2efe9] p-1.5 text-[#83745b]"><CircleHelp className="size-3.5" /></div>
-            <div><p className="text-[11px] font-medium">Need a hand?</p><p className="mt-1 text-[10px] leading-relaxed text-muted-foreground">Visit the team guide for tips and answers.</p></div>
-          </div>
-        </div>
-        <button className="flex items-center gap-3 border-t border-border/70 px-5 py-4 text-left hover:bg-black/[0.02]">
-          <Avatar className="size-8"><AvatarFallback className="bg-[#284f3d] text-[10px] text-white">IK</AvatarFallback></Avatar>
-          <span className="min-w-0 flex-1"><span className="block text-xs font-medium">Ishita Kapoor</span><span className="block text-[10px] text-muted-foreground">Studio admin</span></span>
-          <MoreHorizontal className="size-4 text-muted-foreground" />
-        </button>
-      </aside>
-
-      <section className="conversation-panel flex min-w-0 flex-1 flex-col">
-        <header className="flex h-[72px] shrink-0 items-center justify-between border-b border-border/80 bg-white/90 px-6">
-          <div className="flex min-w-0 items-center gap-3">
-            <div className="project-heading hidden min-w-0 items-center gap-3 md:flex">
-              <Avatar className={`size-9 rounded-xl ${activeProject.color}`}><AvatarFallback className={`rounded-xl text-[11px] font-semibold ${activeProject.color}`}>{activeProject.initials}</AvatarFallback></Avatar>
-              <div className="min-w-0"><div className="flex items-center gap-2"><h1 className="truncate text-[14px] font-semibold tracking-tight">{activeProject.name}</h1><span className="rounded-full bg-[#edf3ee] px-2 py-0.5 text-[9px] font-medium text-[#4e735e]">On track</span></div><p className="mt-0.5 text-[11px] text-muted-foreground">{activeProject.place} <span className="px-1">·</span> Interior renovation</p></div>
-            </div>
-            <label className="mobile-project-picker relative flex min-w-0 flex-1 items-center md:hidden">
-              <select value={activeProject.name} onChange={(event) => setActiveProject(projects.find((project) => project.name === event.target.value) ?? projects[0])} aria-label="Choose project chat" className="w-full appearance-none truncate rounded-lg bg-transparent py-2 pr-6 text-[13px] font-semibold outline-none">
-                {projects.map((project) => <option key={project.name} value={project.name}>{project.name}</option>)}
-              </select>
-              <ChevronDown className="pointer-events-none absolute right-1 size-4 text-muted-foreground" />
-            </label>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="mr-2 hidden items-center -space-x-2 sm:flex">
-              <Avatar className="size-7 ring-2 ring-white"><AvatarFallback className="bg-[#efe7db] text-[9px] text-[#78634c]">MS</AvatarFallback></Avatar>
-              <Avatar className="size-7 ring-2 ring-white"><AvatarFallback className="bg-[#dce9e3] text-[9px] text-[#476657]">AM</AvatarFallback></Avatar>
-              <span className="ml-1 flex size-7 items-center justify-center rounded-full bg-[#f0efec] text-[9px] text-muted-foreground ring-2 ring-white">+3</span>
-            </div>
-            <Button variant="ghost" size="icon" aria-label="Notifications" className="size-9 text-muted-foreground"><Bell className="size-4" /></Button>
-            <Button variant="ghost" size="icon" aria-label="Toggle project details" onClick={() => setShowDetails(!showDetails)} className={`size-9 ${showDetails ? "text-primary" : "text-muted-foreground"}`}><Info className="size-4" /></Button>
-            <Button variant="ghost" size="icon" aria-label="More chat options" className="size-9 text-muted-foreground"><MoreHorizontal className="size-4" /></Button>
-          </div>
-        </header>
-
-        <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto">
-          <div className="mx-auto max-w-[780px] px-5 pb-8 pt-7 sm:px-10">
-            <div className="mb-7 flex items-center gap-3"><Separator className="flex-1" /><span className="date-divider">TODAY · 27 SEP</span><Separator className="flex-1" /></div>
-            <div className="space-y-6" aria-live="polite" aria-label="Project messages">
-              {messages.map((message, index) => {
-                const previous = messages[index - 1]
-                const grouped = previous?.author === message.author
-                return (
-                  <Message key={message.id} align={message.mine ? "end" : "start"} className={grouped ? "-mt-3" : ""}>
-                    <MessageAvatar className={grouped ? "invisible" : ""}>
-                      <Avatar className="size-8"><AvatarFallback className={`text-[9px] font-semibold ${message.accent}`}>{message.initials}</AvatarFallback></Avatar>
-                    </MessageAvatar>
-                    <MessageContent className="max-w-[min(82%,600px)] gap-1.5">
-                      {!grouped && <MessageHeader className={`gap-2 px-1 ${message.mine ? "justify-end" : ""}`}><span className="text-[11px] font-semibold text-foreground">{message.author}</span><span className="text-[10px] font-normal">{message.role}</span><span className="text-[10px] font-normal">· {message.time}</span></MessageHeader>}
-                      <Bubble variant={message.mine ? "tinted" : "secondary"} align={message.mine ? "end" : "start"} className="max-w-full">
-                        <BubbleContent className="px-3.5 py-2.5 text-[12px] leading-[1.7]">{message.text}</BubbleContent>
-                      </Bubble>
-                      {message.attachment && <div className={`attachment-card flex w-fit items-center gap-3 rounded-xl border border-border/70 bg-white px-3 py-2.5 ${message.mine ? "ml-auto" : ""}`}><div className="rounded-lg bg-[#f1eee8] p-2 text-[#887458]"><ImagePlus className="size-4" /></div><div><p className="text-[10px] font-medium">{message.attachment.title}</p><p className="mt-0.5 text-[9px] text-muted-foreground">{message.attachment.meta}</p></div><Button variant="ghost" size="icon" aria-label="Open attachment" className="size-7 text-muted-foreground"><FileText className="size-3.5" /></Button></div>}
-                      <MessageFooter className="min-h-3 px-1 text-[9px] font-normal">{message.mine ? <span className="inline-flex items-center gap-1">Seen by 4 <Check className="size-3 text-primary" /></span> : grouped ? null : null}</MessageFooter>
-                    </MessageContent>
-                  </Message>
-                )
-              })}
-            </div>
-            <div className="my-6 flex items-center gap-3"><Separator className="flex-1" /><span className="date-divider text-primary">NEW MESSAGES</span><Separator className="flex-1" /></div>
-            <Message>
-              <MessageAvatar><Avatar className="size-8"><AvatarFallback className="bg-[#e6e6da] text-[9px] font-semibold text-[#686b4c]">RK</AvatarFallback></Avatar></MessageAvatar>
-              <MessageContent className="max-w-[min(82%,600px)] gap-1.5">
-                <MessageHeader className="gap-2 px-1"><span className="text-[11px] font-semibold text-foreground">Rohan Kulkarni</span><span className="text-[10px] font-normal">Site supervisor</span><span className="text-[10px] font-normal">· 10:06 AM</span></MessageHeader>
-                <Bubble variant="secondary"><BubbleContent className="px-3.5 py-2.5 text-[12px] leading-[1.7]">The second coat is scheduled for tomorrow morning. I’ll post a photo once it’s dry so we can confirm the shade together.</BubbleContent></Bubble>
-                <MessageFooter className="px-1 text-[9px] font-normal"><span className="inline-flex items-center gap-1.5"><span className="size-1.5 rounded-full bg-[#72a783]" />Just now</span></MessageFooter>
-              </MessageContent>
-            </Message>
-          </div>
-        </div>
-
-        <div className="composer-wrap shrink-0 px-5 pb-5 pt-2 sm:px-10">
-          <form onSubmit={sendMessage} className="composer mx-auto max-w-[780px] rounded-2xl border border-border bg-white p-2 shadow-[0_5px_24px_-18px_rgba(35,45,37,0.35)] focus-within:border-primary/40 focus-within:ring-4 focus-within:ring-primary/5">
-            <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={`Message ${activeProject.name}…`} rows={2} className="max-h-32 min-h-12 w-full resize-none bg-transparent px-2.5 py-2 text-[12px] leading-relaxed outline-none placeholder:text-muted-foreground/70" aria-label="Write a message" />
-            <div className="flex items-center justify-between border-t border-border/60 px-1 pt-2">
-              <div className="flex items-center gap-0.5"><Button type="button" variant="ghost" size="icon" aria-label="Attach a file" className="size-8 text-muted-foreground"><Paperclip className="size-4" /></Button><Button type="button" variant="ghost" size="icon" aria-label="Add emoji" className="size-8 text-muted-foreground"><Smile className="size-4" /></Button><span className="mx-1 h-4 border-l border-border" /><button type="button" className="flex items-center gap-1 rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:bg-muted"><Hash className="size-3" /> General <ChevronDown className="size-3" /></button></div>
-              <div className="flex items-center gap-2"><span className="hidden text-[9px] text-muted-foreground sm:block">Enter to send · Shift + Enter for a new line</span><Button type="submit" size="icon" aria-label="Send message" disabled={!draft.trim()} className="size-8 rounded-lg"><Send className="size-3.5" /></Button></div>
-            </div>
-          </form>
-          <p className="mx-auto mt-2 max-w-[780px] text-center text-[9px] text-muted-foreground">Keep project decisions and updates in this conversation so everyone stays in the loop.</p>
-        </div>
-      </section>
-
-      <aside className={`project-details ${showDetails ? "mobile-details-open" : "hidden"} w-[270px] shrink-0 flex-col border-l border-border/80 bg-[#fbfaf8] xl:flex`}>
-        <div className="flex h-[72px] items-center justify-between border-b border-border/80 px-5"><p className="text-[12px] font-semibold">Project details</p><Button variant="ghost" size="icon" aria-label="Close project details" onClick={() => setShowDetails(false)} className="size-8 text-muted-foreground"><X className="size-4" /></Button></div>
-        <div className="overflow-y-auto p-5">
-          <div className="rounded-2xl border border-border/70 bg-white p-4">
-            <Avatar className={`mb-3 size-11 rounded-xl ${activeProject.color}`}><AvatarFallback className={`rounded-xl text-sm font-semibold ${activeProject.color}`}>{activeProject.initials}</AvatarFallback></Avatar>
-            <h2 className="text-[13px] font-semibold">{activeProject.name}</h2><p className="mt-1 text-[10px] text-muted-foreground">{activeProject.place}</p>
-            <div className="mt-4 flex items-center justify-between"><span className="text-[10px] text-muted-foreground">Project status</span><span className="inline-flex items-center gap-1.5 text-[10px] font-medium text-[#547b60]"><span className="size-1.5 rounded-full bg-[#72a783]" />On track</span></div>
-            <Separator className="my-3" /><div className="flex items-center justify-between"><span className="text-[10px] text-muted-foreground">Target completion</span><span className="text-[10px] font-medium">18 Dec 2026</span></div>
-          </div>
-
-          <div className="mt-6"><div className="mb-3 flex items-center justify-between"><p className="section-label">TEAM · 5</p><Button variant="ghost" size="icon" aria-label="Add teammate" className="size-7 text-muted-foreground"><Plus className="size-3.5" /></Button></div>
-            <div className="space-y-3.5">
-              {[{ name: "Maya Sharma", role: "Client", initials: "MS", color: "bg-[#efe7db] text-[#78634c]", online: true }, { name: "Aarav Mehta", role: "Project lead", initials: "AM", color: "bg-[#dce9e3] text-[#476657]", online: true }, { name: "Rohan Kulkarni", role: "Site supervisor", initials: "RK", color: "bg-[#e6e6da] text-[#686b4c]", online: false }, { name: "Neha Shah", role: "Interior designer", initials: "NS", color: "bg-[#e4e9ed] text-[#516477]", online: false }].map((person) => <div key={person.name} className="flex items-center gap-2.5"><div className="relative"><Avatar className="size-8"><AvatarFallback className={`text-[9px] font-semibold ${person.color}`}>{person.initials}</AvatarFallback></Avatar>{person.online && <span className="absolute right-0 bottom-0 size-2 rounded-full border-2 border-[#fbfaf8] bg-[#73a783]" />}</div><div><p className="text-[10px] font-medium">{person.name}</p><p className="mt-0.5 text-[9px] text-muted-foreground">{person.role}</p></div></div>)}
-            </div>
-          </div>
-
-          <div className="mt-7"><div className="mb-3 flex items-center justify-between"><p className="section-label">PINNED FILES</p><button className="text-[9px] font-medium text-primary">See all</button></div><div className="space-y-2"><button className="file-row flex w-full items-center gap-2.5 rounded-lg border border-border/70 bg-white p-2.5 text-left"><span className="rounded-md bg-[#f3eee6] p-1.5 text-[#91764f]"><FileText className="size-3.5" /></span><span className="min-w-0"><span className="block truncate text-[9px] font-medium">Living room · moodboard</span><span className="mt-0.5 block text-[8px] text-muted-foreground">Updated yesterday</span></span></button><button className="file-row flex w-full items-center gap-2.5 rounded-lg border border-border/70 bg-white p-2.5 text-left"><span className="rounded-md bg-[#eaf0eb] p-1.5 text-[#62806c]"><ImagePlus className="size-3.5" /></span><span className="min-w-0"><span className="block truncate text-[9px] font-medium">Paint samples · 4 photos</span><span className="mt-0.5 block text-[8px] text-muted-foreground">Added 24 Sep</span></span></button></div></div>
-
-          <div className="mt-7 rounded-xl bg-[#f1efe9] p-3.5"><div className="flex items-center gap-2"><div className="rounded-md bg-white p-1.5 text-[#80745f]"><Check className="size-3.5" /></div><p className="text-[10px] font-medium">Current milestone</p></div><p className="mt-2 text-[11px] font-medium">Painting & finishes</p><p className="mt-1 text-[9px] leading-relaxed text-muted-foreground">Second coat begins tomorrow morning.</p><button className="mt-3 text-[9px] font-medium text-primary">View project plan →</button></div>
-        </div>
-      </aside>
-    </main>
-  )
+    {team && project && <Panel title="Project people" close={() => { setTeam(false); setError('') }}><div className="panel-body">{showError}<h2>The people behind<br />{project.name}.</h2>{snapshot.users.filter(u => founder || snapshot.memberships.some(m => m.projectId === projectId && m.userId === u.id)).map(u => { const member = snapshot.memberships.some(m => m.projectId === projectId && m.userId === u.id); return <div className="person-row" key={u.id}><span className="avatar">{shortName(u.name)}</span><span><strong>{u.name}</strong><small>{u.role}{!u.active ? ' · Disabled' : ''}</small></span>{founder && u.role !== 'Founder' && u.active && <><button className="text-button" disabled={busy} onClick={() => { void perform(() => api(`/projects/${projectId}/members`, 'POST', { userId: u.id, add: !member }), false) }}>{member ? 'Remove' : 'Add'}</button><button className="icon-button" aria-label={`Disable ${u.name}`} onClick={() => { setDisableId(u.id); setModal('disable') }}><X size={14} /></button></>}</div> })}{founder && <div className="setup-actions"><button className="secondary-button" onClick={() => setModal('employee')}><Plus size={15} />Add team member</button><button className="text-button" onClick={() => setModal('request')}>Record an external question</button><button className="text-button" onClick={() => setModal('client')}>Add another client</button></div>}</div></Panel>}
+    <WorkspaceDialogs modal={modal} review={null} disableId={disableId} snapshot={snapshot} projectId={projectId} activeTask={activeTask} busy={busy} error={error} setModal={setModal} close={() => { setModal(null); setError('') }} perform={perform} navigate={navigate} />
+  </main>
 }
 
+function Timeline({ tasks, open, move, founder, busy }: { tasks: Task[]; open: (id: string) => void; move: (t: Task, start: string) => Promise<void>; founder: boolean; busy: boolean }) {
+  const dates = tasks.map(t => t.forecastStart).filter(Boolean).sort()
+  const start = dates[0] || new Date().toISOString().slice(0, 10)
+  const days = Array.from({ length: 28 }, (_, i) => new Date(Date.parse(`${start}T00:00:00Z`) + i * 86400000).toISOString().slice(0, 10))
+  const [proposal, setProposal] = useState<{ task: Task; start: string } | null>(null)
+  return <section className="plan-section"><div className="section-heading"><div><h2>A plan with room to move.</h2><p className="muted">Calendar days. Move unstarted work; dependent dates follow.</p></div></div><div className="timeline-scroll"><div className="timeline-grid"><div className="timeline-head"><span>Work</span>{days.map(d => <span key={d}>{date(d)}</span>)}</div>{tasks.filter(t => t.forecastStart).map(t => <div className="timeline-row" key={t.id}><button onClick={() => open(t.id)}>{t.title}<small>{t.externalName || t.ownerName}</small></button>{days.map(d => <div className="day-cell" key={d} onDragOver={e => { if (founder && !busy) e.preventDefault() }} onDrop={e => { e.preventDefault(); const source = tasks.find(t => t.id === e.dataTransfer.getData('text/plain')); if (source && !source.actualStart && source.status !== 'Resolved') setProposal({ task: source, start: d }) }}>{d === t.forecastStart && <button className={`timeline-bar ${t.status === 'Resolved' ? 'complete' : ''}`} draggable={founder && !busy && !t.actualStart && t.status !== 'Resolved'} onDragStart={e => e.dataTransfer.setData('text/plain', t.id)} onClick={() => open(t.id)} style={{ width: `${Math.max(1, Math.min(28 - days.indexOf(d), Math.round((Date.parse(t.forecastEnd) - Date.parse(t.forecastStart)) / 86400000) + 1)) * 68 - 8}px` }}>{t.title}</button>}</div>)}</div>)}</div></div>{proposal && <div className="move-preview"><p>Move <strong>{proposal.task.title}</strong> to {date(proposal.start)}? Unstarted dependent work will be recalculated; the original plan stays in history.</p><button className="secondary-button" onClick={() => setProposal(null)}>Cancel</button><button className="primary-button" disabled={busy} onClick={() => { void move(proposal.task, proposal.start).then(() => setProposal(null)) }}>Apply move</button></div>}<div className="section-block"><h3>Dates to confirm</h3>{tasks.filter(t => !t.forecastStart).map(t => <button className="undated-row" key={t.id} onClick={() => open(t.id)}><span>{t.title}<small>{t.unscheduledReason || 'Duration not confirmed'}</small></span><ChevronRight size={15} /></button>)}{tasks.every(t => t.forecastStart) && <p className="muted">All work has forecast dates.</p>}</div></section>
+}
 export default App
