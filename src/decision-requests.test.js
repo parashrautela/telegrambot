@@ -73,3 +73,17 @@ test('persisted request sync retries failures and stops after acknowledged deliv
   await retryDecisionRequestSync(store); assert.equal(row.WebSyncStatus,'Synced'); assert.ok(row.WebSyncedAt);
   await retryDecisionRequestSync(store); assert.equal(count,2);
 });
+test('/query and /update are the group tags; plain team chat is ignored', () => {
+  const query = parseDecisionRequest({ ...message, text: '/query When does tiling start?' }, 'our_bot');
+  assert.deepEqual([query.RequestType, query.RequestID], ['Question', 'REQ--123-10-question']);
+  assert.equal(parseDecisionRequest({ ...message, text: '/update@our_bot Walls done' }, 'our_bot').RequestType, 'Update');
+  const photo = parseDecisionRequest({ ...message, text: undefined, caption: '/update Plaster finished', photo: [{ file_id: 'a' }, { file_id: 'b' }] }, 'our_bot');
+  assert.equal(photo.OriginalMessage, 'Plaster finished');
+  assert.equal(JSON.parse(photo.AttachmentsJSON)[0].fileId, 'b');
+  const reply = parseDecisionRequest({ ...message, text: '/query', reply_to_message: { message_id: 4, from: { id: 9, first_name: 'Carpenter' }, photo: [{ file_id: 'p' }] } }, 'our_bot');
+  assert.equal(reply.OriginalSenderName, 'Carpenter');
+  assert.equal(JSON.parse(reply.AttachmentsJSON)[0].fileId, 'p');
+  const project = { ClientTelegramID: '50', GroupChatID: '-123' };
+  assert.equal(parseClientRequest({ ...message, from: { id: 1, first_name: 'Worker' }, text: 'ping' }, project, 'our_bot'), null);
+  assert.equal(parseClientRequest({ ...message, from: { id: 50, first_name: 'Client' }, text: 'When is handover?' }, project, 'our_bot').AutomaticClientQuery, 'Yes');
+});

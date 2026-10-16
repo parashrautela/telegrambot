@@ -6,7 +6,7 @@ import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProj
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
 import { applyReviewDecision, completionBlockReason, createDraftRevision, dependencyEdges, forecastDelayImpact, parseUserDate, previewTradeOrderOverride, projectedFinish, resolveDrawing, withForecastDefaults } from './workflow-engine.js';
-import { answerCallback, getChatAdministrators, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
+import { GROUP_COMMANDS, answerCallback, getChatAdministrators, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto, setMyCommands } from './telegram.js';
 import { archiveProjectResource } from './drive-storage.js';
 import { retryProjectResources } from './project-resources.js';
 import { startWebBridge } from './web-bridge.js';
@@ -24,6 +24,8 @@ const founderGroupMessageDrafts = new Map();
 const groupBotProfile = await getMe(config.groupToken);
 const leaderBotProfile = await getMe(config.leaderToken);
 const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
+// A failed menu update must never stop the bot; the commands still work when typed.
+await setMyCommands(config.groupToken, GROUP_COMMANDS, { type: 'all_group_chats' }).catch((error) => console.warn('Could not set the group command menu:', error.message));
 const observedGroups = new Set();
 
 async function observeGroup(chat) {
@@ -254,7 +256,7 @@ async function askFounderForPlan({ project, clientName, replaceUntouchedLegacyPl
   if (project.WebManaged === 'Yes' || (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET)) return; // The web app owns setup for this project.
   const legacyNote = replaceUntouchedLegacyPlan ? '\n\nThis project has an untouched legacy house plan. Choosing an option will archive those unused task records and generate the selected plan; nothing is deleted.' : '';
   return sendMessage(config.leaderToken, config.founderTelegramId, `<b>Client profile complete</b>\n\n${escape(clientName)} is now marked as the client for <b>${escape(project.ProjectName)}</b>. Which plan should we assign?\n\nThe selected plan will generate the project tasks and share its linked resources with the group.${legacyNote}`, {
-    inline_keyboard: WORKFLOW_OPTIONS.map((option) => [{ text: option.label, callback_data: `choose_plan:${project.ProjectID}:${option.id}` }]),
+    inline_keyboard: WORKFLOW_OPTIONS.filter((option) => !option.webOnly).map((option) => [{ text: option.label, callback_data: `choose_plan:${project.ProjectID}:${option.id}` }]),
   });
 }
 

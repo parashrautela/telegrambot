@@ -216,6 +216,11 @@ export function sheetPlanDefinitions(sheetStages) {
   return rows;
 }
 
+// Raw stage list, read by the web "start from the default plan" option.
+export function interiorSheetStages() {
+  return STAGES;
+}
+
 export function interiorSheetDefinitions() {
   return sheetPlanDefinitions(STAGES);
 }

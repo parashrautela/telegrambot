@@ -5,8 +5,9 @@ import { createProjectShell, assignWorkflowToProject } from './project-service.j
 import { getChatMember, sendMessage } from './telegram.js';
 
 import { downloadProjectResource } from './drive-storage.js';
-import { WORKFLOW_OPTIONS } from './schema.js';
-import { rescheduleTasks } from './workflow-engine.js';
+import { BLANK_WORKFLOW_ID, WORKFLOW_OPTIONS } from './schema.js';
+import { projectedFinish, rescheduleTasks, withForecastDefaults } from './workflow-engine.js';
+import { STAGE_WORKFLOW_ID, buildStagePlan, defaultPlanStages, insertStageTask, planTaskAction, scheduleSentence } from './stage-plan.js';
 
 const active = new Set(['creator', 'owner', 'administrator', 'member', 'restricted']);
 const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
@@ -142,6 +143,81 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
         } finally { if (apply) startingProjects.delete(lockKey); }
       }
+      if (req.method === 'POST' && req.url === '/api/integrations/web/default-plan') {
+        return respond(res, 200, { stages: defaultPlanStages() });
+      }
+      // Founder-built plans: add stages, add a task inside a stage, and delay/redo/complete a task.
+      // Every route takes mode "preview" (nothing is written) or "apply".
+      if (req.method === 'POST' && ['/api/integrations/web/stages/add', '/api/integrations/web/stages/insert-task', '/api/integrations/web/tasks/action'].includes(req.url)) {
+        const input = await readBody(req);
+        const project = await store.projectForGroup(String(input.groupChatId || ''));
+        if (!project) return respond(res, 404, { error: 'Linked project not found.' });
+        if (['Completed', 'Abandoned'].includes(project.Status)) return respond(res, 409, { error: 'This project is closed.' });
+        if (!['preview', 'apply'].includes(input.mode)) return respond(res, 400, { error: 'Choose preview or apply.' });
+        const apply = input.mode === 'apply';
+        const lockKey = 'tasks:' + project.ProjectID;
+        if (apply && startingProjects.has(lockKey)) return respond(res, 409, { error: 'Another schedule change is being saved. Try again in a moment.' });
+        if (apply) startingProjects.add(lockKey);
+        try {
+          const rows = await store.tasksForProject(project.ProjectID);
+          const actorName = String(input.actorName || 'Founder').slice(0, 100);
+          const groupMembers = (await store.rows('GroupMembers')).filter((member) => String(member.GroupChatID) === String(project.GroupChatID));
+          const options = { projectId: project.ProjectID, groupMembers, lastUpdatedBy: founderTelegramId, today: new Date().toISOString().slice(0, 10) };
+          const stamp = new Date().toISOString();
+
+          if (req.url.endsWith('/stages/add')) {
+            const specs = Array.isArray(input.stages) ? input.stages : [input.stage];
+            const plan = buildStagePlan(rows, specs, options);
+            const finish = projectedFinish(withForecastDefaults([...rows, ...plan.rows]));
+            const created = plan.rows.map((row) => ({ taskId: row.TaskID, title: row.TaskName, stage: row.Stage, start: row.ForecastStart, end: row.ForecastEnd, role: row.AssignedRole, assigneeName: row.AssignedName, status: row.Status }));
+            const summary = { ok: true, conflicts: [], warnings: plan.warnings, stages: plan.stages, created, finish };
+            if (!apply) return respond(res, 200, summary);
+            await store.appendRows('Tasks', plan.rows);
+            if (finish && finish !== project.TargetEndDate) await store.updateRow('Projects', project.rowNumber, { TargetEndDate: finish });
+            await store.audit({ projectId: project.ProjectID, action: 'Stage added', newValue: plan.stages.map((stage) => stage.name).join(', '), actor: founderTelegramId, actorName, source: 'Web timeline', details: plan.stages.map((stage) => `${stage.name}: ${stage.startDate || '?'}→${stage.endDate || '?'}`).join('; ') });
+            return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
+          }
+
+          if (req.url.endsWith('/stages/insert-task')) {
+            const { row, rewire } = insertStageTask(rows, input.task || {}, options);
+            const rewired = rows.map((task) => {
+              const change = rewire.find((item) => item.taskId === task.TaskID);
+              return change ? { ...task, PredecessorTaskIDs: change.PredecessorTaskIDs, PredecessorTaskID: change.PredecessorTaskID } : task;
+            });
+            const result = rescheduleTasks([...rewired, row], []);
+            // The new row is appended, not updated, so it takes whatever dates the engine gave it.
+            const placed = result.tasks.find((task) => task.TaskID === row.TaskID);
+            if (placed?.ForecastStart) Object.assign(row, { ForecastStart: placed.ForecastStart, ForecastEnd: placed.ForecastEnd, PlannedStart: placed.ForecastStart, PlannedEnd: placed.ForecastEnd, BlockedReason: '' });
+            result.affected = result.affected.filter((item) => item.taskId !== row.TaskID);
+            const summary = { ok: result.ok, conflicts: result.conflicts, warnings: result.warnings, affected: result.affected, finish: result.finish, created: [{ taskId: row.TaskID, title: row.TaskName, stage: row.Stage, start: row.ForecastStart, end: row.ForecastEnd }] };
+            if (!apply) return respond(res, 200, summary);
+            if (!result.ok) return respond(res, 409, { ...summary, error: result.conflicts[0].reason });
+            await store.appendRows('Tasks', [row]);
+            await store.updateRows('Tasks', rewire.map((item) => ({ rowNumber: item.rowNumber, changes: { PredecessorTaskIDs: item.PredecessorTaskIDs, PredecessorTaskID: item.PredecessorTaskID, LastUpdatedAt: stamp, LastUpdatedBy: String(founderTelegramId) } })));
+            await writeSchedule(store, project, rewired, result, { actor: founderTelegramId, actorName, source: 'Web timeline' });
+            await store.audit({ projectId: project.ProjectID, taskId: row.TaskID, action: 'Task added to stage', newValue: row.TaskName, actor: founderTelegramId, actorName, source: 'Web timeline', details: `${row.ForecastStart || '?'}→${row.ForecastEnd || '?'}; ${result.affected.length} later task(s) moved` });
+            return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
+          }
+
+          // tasks/action: the stale-view guard also makes a retried apply fail instead of delaying twice.
+          const current = rows.find((task) => task.TaskID === input.taskId);
+          if (current && ((input.fromStart !== undefined && input.fromStart !== effectiveStart(current)) || (input.fromEnd !== undefined && input.fromEnd !== effectiveEnd(current)))) {
+            return respond(res, 409, { error: 'The schedule changed since you opened it. Refresh and try again.', stale: [current.TaskID] });
+          }
+          const plan = planTaskAction(rows, { taskId: String(input.taskId || ''), action: input.action, days: input.days }, { today: options.today });
+          const result = rescheduleTasks(rows, plan.moves);
+          const sentence = scheduleSentence(plan.summary, result.affected, result.finish);
+          const summary = { ok: result.ok, conflicts: result.conflicts, warnings: result.warnings, affected: result.affected, finish: result.finish, summary: sentence };
+          if (!apply) return respond(res, 200, summary);
+          if (!result.ok) return respond(res, 409, { ...summary, error: result.conflicts[0].reason });
+          // Dates first: the engine will not move a task that is already marked Completed.
+          await writeSchedule(store, project, rows, result, { actor: founderTelegramId, actorName, source: 'Web query' });
+          if (Object.keys(plan.statusChange).length) await store.updateRow('Tasks', plan.row.rowNumber, { ...plan.statusChange, LastUpdatedAt: stamp, LastUpdatedBy: String(founderTelegramId) });
+          const action = { delay: 'Task delayed', redo: 'Task sent back for rework', complete: 'Task completed' }[input.action];
+          await store.audit({ projectId: project.ProjectID, taskId: plan.row.TaskID, action, oldValue: `${effectiveStart(plan.row)}→${effectiveEnd(plan.row)} ${plan.row.Status}`, newValue: sentence, actor: founderTelegramId, actorName, source: 'Web query', details: String(input.note || '').slice(0, 500) });
+          return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
+        } finally { if (apply) startingProjects.delete(lockKey); }
+      }
       if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/publish'].includes(req.url)) {
         const input = await readBody(req);
         const request = (await store.rows('DecisionRequests')).find(row => row.RequestID === input.requestId && String(row.GroupChatID) === String(input.groupChatId));
@@ -226,7 +302,9 @@ export function startWebBridge({ store, token, founderTelegramId }) {
             stage.durationDays += Number(row.DurationDays) || 0; stage.tasks.push(row.TaskName);
           }
           return {id:option.id,name:option.label,description:option.description,stages,parallel:Boolean(option.parallel)};
-        }).filter((workflow)=>workflow.stages.length);
+        }).filter((workflow)=>workflow.stages.length || workflow.id===BLANK_WORKFLOW_ID);
+        // Blank first: founders said most projects should start empty and grow stage by stage.
+        workflows.sort((a,b)=>(b.id===BLANK_WORKFLOW_ID)-(a.id===BLANK_WORKFLOW_ID));
         return respond(res,200,{workflows});
       }
       if (req.method === 'POST' && req.url === '/api/integrations/web/projects/start') {
@@ -241,8 +319,27 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         await store.updateRow('Projects',project.rowNumber,{WebManaged:'Yes'});
         const roster = (await store.rows('GroupMembers')).filter((member)=>String(member.GroupChatID)===groupChatId && member.MembershipStatus==='Active');
         if (roster.length < 2 || roster.some((member)=>!member.AssignedName || !member.AssignedRole) || roster.filter((member)=>/\bclient\b/i.test(member.AssignedRole)).length!==1 || !roster.some((member)=>!/\b(client|founder)\b/i.test(member.AssignedRole))) return respond(res,409,{error:'Assign one client and at least one team member, and finish all member profiles first.'});
-        let tasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>!String(task.Status).startsWith('Archived') && task.WorkflowID!=='WEB-CUSTOM');
+        // Web-added stages and custom tasks are not a template, so they never count as "a different workflow".
+        let tasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>!String(task.Status).startsWith('Archived') && !['WEB-CUSTOM',STAGE_WORKFLOW_ID].includes(task.WorkflowID));
         if (tasks.length && tasks.some((task)=>task.WorkflowID!==option.id)) return respond(res,409,{error:'This project already has a different workflow.'});
+        if (option.id === BLANK_WORKFLOW_ID) {
+          // A blank project starts with no tasks; founders add stages from the web timeline.
+          const startDate = input.startDate || project.StartDate;
+          if (!isoDate(startDate)) return respond(res,400,{error:'Enter a valid start date.'});
+          const client = roster.find((member)=>/\bclient\b/i.test(member.AssignedRole));
+          if (project.Status !== 'Active' || project.StartDate !== startDate) await store.updateRow('Projects',project.rowNumber,{StartDate:startDate,Status:'Active',WebManaged:'Yes',ClientName:client.AssignedName,ClientTelegramID:String(client.TelegramUserID),Notes:'Blank plan started from the web app'});
+          let announcementStatus = project.WorkflowAnnouncementStatus || '';
+          if (!announcementStatus) {
+            await store.updateRow('Projects',project.rowNumber,{WorkflowAnnouncementStatus:'Sending'});
+            try {
+              await sendMessage(token,groupChatId,`<b>Project started — ${escape(project.ProjectName)}</b>\n\nThe team will add stages as work is planned. Please share plans, reference photos and documents in this group. Use /query to ask the studio something and /update to share progress.`);
+              announcementStatus='Sent';
+            } catch { announcementStatus='Unknown'; }
+            await store.updateRow('Projects',project.rowNumber,{WorkflowAnnouncementStatus:announcementStatus});
+          }
+          const stageTasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>task.WorkflowID===STAGE_WORKFLOW_ID);
+          return respond(res,200,{projectId:project.ProjectID,workflowId:option.id,workflowName:option.label,tasks:stageTasks,announcementStatus:announcementStatus==='Sending'?'Unknown':announcementStatus});
+        }
         if (!tasks.length) {
           if (!/^\d{4}-\d{2}-\d{2}$/.test(input.startDate || '') || !Number.isFinite(Date.parse(input.startDate)) || new Date(input.startDate).toISOString().slice(0,10)!==input.startDate) return respond(res,400,{error:'Enter a valid start date.'});
           await store.updateRow('Projects',project.rowNumber,{StartDate:input.startDate,WebManaged:'Yes'});

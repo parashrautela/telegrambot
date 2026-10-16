@@ -144,7 +144,11 @@ export function templateRecord(step) {
   };
 }
 
+export const BLANK_WORKFLOW_ID = 'BLANK-V1';
+
 export const WORKFLOW_OPTIONS = [
+  // Web only: it has no template rows, the founder adds stages from the web timeline.
+  { id: BLANK_WORKFLOW_ID, label: 'Blank project', description: 'Start empty and add stages as the project goes', webOnly: true },
   { id: 'HOUSE-V1', label: 'New home / construction', description: 'Full house-building workflow' },
   { id: 'RESTORATION-V1', label: 'Restoration', description: 'Repair and restore an existing property' },
   { id: 'PAINTING-V1', label: 'Painting & finishes', description: 'Painting-led refresh workflow' },
