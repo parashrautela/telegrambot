@@ -1,0 +1,33 @@
+[
+  {
+    "key": "site-check",
+    "title": "Site Condition Check",
+    "role": "Site Supervisor"
+  },
+  {
+    "key": "drawing",
+    "title": "Drawing",
+    "role": "Designer"
+  },
+  {
+    "key": "approval",
+    "title": "Drawing approval",
+    "role": "Design Head/ Admin"
+  },
+  {
+    "key": "client",
+    "title": "Client Presentation & approval",
+    "role": "Client"
+  },
+  {
+    "key": "execution",
+    "title": "Site Execution",
+    "role": "Site Team",
+    "roleEditable": true
+  },
+  {
+    "key": "final-check",
+    "title": "Final check",
+    "role": "Design Head/ Admin"
+  }
+]

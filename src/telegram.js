@@ -21,6 +21,14 @@ export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, 
 export const getMe = (token) => api(token, 'getMe');
 export const getChatMember = (token, chatId, userId) => api(token, 'getChatMember', { chat_id: chatId, user_id: userId });
 export const getChatAdministrators = (token, chatId) => api(token, 'getChatAdministrators', { chat_id: chatId });
+// The list Telegram shows when someone types "/" in a chat.
+export const setMyCommands = (token, commands, scope) => api(token, 'setMyCommands', { commands, ...(scope ? { scope } : {}) });
+
+// Group members tag messages with these so only intended messages reach the founder's inbox.
+export const GROUP_COMMANDS = [
+  { command: 'query', description: 'Ask the studio a question' },
+  { command: 'update', description: 'Share a progress update' },
+];
 
 export async function poll(token, label, onUpdate) {
   let offset = 0;

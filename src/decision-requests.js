@@ -3,7 +3,8 @@ const name = (from) => [from?.first_name, from?.last_name].filter(Boolean).join(
 export function parseDecisionRequest(message, botUsername) {
   if (!['group', 'supergroup'].includes(message.chat?.type)) return null;
   const text = (message.text || message.caption || '').trim();
-  const match = text.match(/^\/(approval|question)(?:@([\w]+))?(?:\s+([\s\S]*))?$/i);
+  // /query and /update are the two tags in the group's "/" menu; /approval and /question still work.
+  const match = text.match(/^\/(approval|question|query|update)(?:@([\w]+))?(?:\s+([\s\S]*))?$/i);
   if (!match || (match[2] && match[2].toLowerCase() !== botUsername.toLowerCase())) return null;
   const original = message.reply_to_message || message;
   const context = (match[3] || '').trim();
@@ -16,7 +17,7 @@ export function parseDecisionRequest(message, botUsername) {
   }
   const originalText = message.reply_to_message ? (original.text || original.caption || '') : context;
   if (!originalText && !attachments.length && !context) {
-    throw new Error('Reply to a message with /approval or /question, or add your request after the command.');
+    throw new Error('Reply to a message with /query or /update, or add your message after the command.');
   }
   return {
     RequestID: `REQ-${message.chat.id}-${original.message_id}-${match[1].toLowerCase()}`,
@@ -24,7 +25,7 @@ export function parseDecisionRequest(message, botUsername) {
     CommandMessageID: String(message.message_id), RequestedByTelegramID: String(message.from?.id || ''),
     RequestedByName: name(message.from), OriginalSenderTelegramID: String(original.from?.id || original.sender_chat?.id || ''),
     OriginalSenderName: original.sender_chat?.title || name(original.from),
-    RequestType: match[1].toLowerCase() === 'approval' ? 'Approval' : 'Question',
+    RequestType: { approval: 'Approval', update: 'Update' }[match[1].toLowerCase()] || 'Question',
     OriginalMessage: originalText, RequestContext: message.reply_to_message ? context : '',
     AttachmentsJSON: JSON.stringify(attachments), Status: 'Pending',
     CreatedAt: new Date((message.date || Math.floor(Date.now() / 1000)) * 1000).toISOString(),
