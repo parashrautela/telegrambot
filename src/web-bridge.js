@@ -6,6 +6,7 @@ import { getChatMember, sendMessage } from './telegram.js';
 
 import { downloadProjectResource } from './drive-storage.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
+import { rescheduleTasks } from './workflow-engine.js';
 
 const active = new Set(['creator', 'owner', 'administrator', 'member', 'restricted']);
 const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
@@ -15,6 +16,47 @@ async function readBody(req) {
   let raw = '';
   for await (const chunk of req) { raw += chunk; if (raw.length > 50_000) throw new Error('Request too large.'); }
   return JSON.parse(raw || '{}');
+}
+
+const isoDate = (value) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
+const effectiveStart = (task) => task.ForecastStart || task.CurrentStart || task.PlannedStart || '';
+const effectiveEnd = (task) => task.ForecastEnd || task.CurrentEnd || task.PlannedEnd || '';
+
+function parseMoves(input) {
+  if (!Array.isArray(input) || !input.length || input.length > 60) return null;
+  const seen = new Set();
+  for (const move of input) {
+    if (!move || typeof move.taskId !== 'string' || !/^[A-Za-z0-9_.-]{1,160}$/.test(move.taskId) || seen.has(move.taskId)) return null;
+    if (!isoDate(move.start) || !isoDate(move.end)) return null;
+    if ((move.fromStart !== undefined && move.fromStart !== '' && !isoDate(move.fromStart)) || (move.fromEnd !== undefined && move.fromEnd !== '' && !isoDate(move.fromEnd))) return null;
+    seen.add(move.taskId);
+  }
+  return input.map(({ taskId, start, end, fromStart, fromEnd, forecastOnly }) => ({ taskId, start, end, fromStart, fromEnd, forecastOnly: forecastOnly === true }));
+}
+
+// Writes an engine result to the Tasks sheet in one batch. Moved tasks become the committed current plan;
+// pushed successors change forecast only. Baseline planned dates are kept, and filled only when blank.
+async function writeSchedule(store, project, rows, result, { actor, actorName, source }) {
+  const byId = new Map(rows.map((row) => [row.TaskID, row]));
+  const stamp = new Date().toISOString();
+  const rowChanges = result.affected.map((item) => {
+    const row = byId.get(item.taskId);
+    const changes = { ForecastStart: item.forecastStart, ForecastEnd: item.forecastEnd, LastUpdatedAt: stamp, LastUpdatedBy: String(actor) };
+    if (item.committed) Object.assign(changes, { CurrentStart: item.forecastStart, CurrentEnd: item.forecastEnd });
+    if (item.committed && !row.PlannedStart && !row.PlannedEnd) Object.assign(changes, { PlannedStart: item.forecastStart, PlannedEnd: item.forecastEnd });
+    return { rowNumber: row.rowNumber, changes };
+  });
+  await store.updateRows('Tasks', rowChanges);
+  if (result.finish && result.finish !== project.TargetEndDate) await store.updateRow('Projects', project.rowNumber, { TargetEndDate: result.finish });
+  const moved = result.affected.filter((item) => item.committed);
+  if (!moved.length) return;
+  await store.audit({
+    projectId: project.ProjectID, taskId: moved.map((item) => item.taskId).join(','), action: 'Schedule changed',
+    oldValue: moved.map((item) => `${item.taskId} ${item.previousStart || '?'}→${item.previousEnd || '?'}`).join('; '),
+    newValue: moved.map((item) => `${item.taskId} ${item.forecastStart}→${item.forecastEnd}`).join('; '),
+    actor, actorName, source,
+    details: `${result.affected.length - moved.length} dependent task(s) also moved${result.finish ? `; projected finish ${result.finish}` : ''}${result.warnings.length ? `; warnings: ${result.warnings.map((warning) => warning.reason).join(' ')}` : ''}`,
+  });
 }
 
 export function startWebBridge({ store, token, founderTelegramId }) {
@@ -49,13 +91,56 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           updates.push({existing,item,assignee});
         }
         if(!updates.length)return respond(res,200,{tasks});
+        // Write only fields the web actually changed. Dates go through the engine so dependents move and the baseline survives.
+        const fieldChanges=[];const moves=[];
         for(const {existing,item,assignee} of updates){
-          const changes={TaskName:item.title,Stage:item.stage,Status:item.status,PlannedEnd:item.deadline,CurrentEnd:item.deadline,AssignedTelegramID:assignee,AssignedName:String(item.assigneeName || '').slice(0,100),LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(founderTelegramId)};
-          if(existing)await store.updateRow('Tasks',existing.rowNumber,changes);
-          else {await store.append('Tasks',{TaskID:item.taskId,ProjectID:project.ProjectID,WorkflowID:'WEB-CUSTOM',Sequence:Math.max(0,...tasks.map(task=>Number(task.Sequence)||0))+10,...changes},{raw:true});tasks.push({TaskID:item.taskId,Sequence:Math.max(0,...tasks.map(task=>Number(task.Sequence)||0))+10});}
+          const fields={TaskName:item.title,Stage:item.stage,Status:item.status,AssignedTelegramID:assignee,AssignedName:String(item.assigneeName || '').slice(0,100)};
+          if(existing){
+            const changes=Object.fromEntries(Object.entries(fields).filter(([field,value])=>String(existing[field] ?? '')!==String(value)));
+            if(Object.keys(changes).length)fieldChanges.push({rowNumber:existing.rowNumber,changes:{...changes,LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(founderTelegramId)}});
+            // A blank web deadline never wipes sheet dates; only a real new end date reschedules.
+            if(item.deadline && item.deadline!==effectiveEnd(existing)){
+              const start=effectiveStart(existing) && effectiveStart(existing)<=item.deadline?effectiveStart(existing):item.deadline;
+              moves.push({taskId:existing.TaskID,start,end:item.deadline});
+            }
+          }
+          else {const sequence=Math.max(0,...tasks.map(task=>Number(task.Sequence)||0))+10;await store.append('Tasks',{TaskID:item.taskId,ProjectID:project.ProjectID,WorkflowID:'WEB-CUSTOM',Sequence:sequence,...fields,PlannedEnd:item.deadline,CurrentEnd:item.deadline,ForecastEnd:item.deadline,LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(founderTelegramId)},{raw:true});tasks.push({TaskID:item.taskId,Sequence:sequence});}
+        }
+        await store.updateRows('Tasks',fieldChanges);
+        if(moves.length){
+          const rows=await store.tasksForProject(project.ProjectID);
+          const result=rescheduleTasks(rows,moves,{enforce:false});
+          await writeSchedule(store,project,rows,result,{actor:founderTelegramId,actorName:'Web app',source:'Web task edit'});
         }
         return respond(res,200,{tasks:await store.tasksForProject(project.ProjectID)});
         } finally { startingProjects.delete(syncKey); }
+      }
+      if (req.method === 'POST' && ['/api/integrations/web/schedule/preview', '/api/integrations/web/schedule/apply'].includes(req.url)) {
+        const input = await readBody(req);
+        const project = await store.projectForGroup(String(input.groupChatId || ''));
+        if (!project) return respond(res, 404, { error: 'Linked project not found.' });
+        const moves = parseMoves(input.moves);
+        if (!moves) return respond(res, 400, { error: 'Send 1 to 60 moves with a task ID and real YYYY-MM-DD start and end dates.' });
+        const apply = req.url.endsWith('/apply');
+        const lockKey = 'tasks:' + project.ProjectID;
+        if (apply && startingProjects.has(lockKey)) return respond(res, 409, { error: 'Another schedule change is being saved. Try again in a moment.' });
+        if (apply) startingProjects.add(lockKey);
+        try {
+          const rows = await store.tasksForProject(project.ProjectID);
+          // Reject moves made from an out-of-date view, so two people cannot silently overwrite each other.
+          const stale = moves.filter((move) => {
+            const row = rows.find((item) => item.TaskID === move.taskId);
+            return row && ((move.fromStart !== undefined && move.fromStart !== effectiveStart(row)) || (move.fromEnd !== undefined && move.fromEnd !== effectiveEnd(row)));
+          });
+          if (stale.length) return respond(res, 409, { error: 'The schedule changed since you opened it. Refresh and try again.', stale: stale.map((move) => move.taskId) });
+          const result = rescheduleTasks(rows, moves);
+          const summary = { ok: result.ok, conflicts: result.conflicts, warnings: result.warnings, affected: result.affected, finish: result.finish };
+          if (!apply) return respond(res, 200, summary);
+          if (!result.ok) return respond(res, 409, { ...summary, error: result.conflicts[0].reason });
+          const actorName = String(input.actorName || 'Founder').slice(0, 100);
+          await writeSchedule(store, project, rows, result, { actor: founderTelegramId, actorName, source: 'Web timeline' });
+          return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
+        } finally { if (apply) startingProjects.delete(lockKey); }
       }
       if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/publish'].includes(req.url)) {
         const input = await readBody(req);
@@ -140,7 +225,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
             if (!stage) { stage = {name:row.Stage,durationDays:0,tasks:[]}; stages.push(stage); }
             stage.durationDays += Number(row.DurationDays) || 0; stage.tasks.push(row.TaskName);
           }
-          return {id:option.id,name:option.label,description:option.description,stages,parallel:option.id==='RESIDENTIAL-INTERIOR-V1'};
+          return {id:option.id,name:option.label,description:option.description,stages,parallel:Boolean(option.parallel)};
         }).filter((workflow)=>workflow.stages.length);
         return respond(res,200,{workflows});
       }

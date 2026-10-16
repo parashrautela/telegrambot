@@ -6,7 +6,7 @@ const existing = new Set((await store.rows('WorkflowTemplates')).map((row) => ro
 let added = 0;
 for (const [workflowId, steps] of Object.entries(WORKFLOWS)) {
   if (existing.has(workflowId)) continue;
-  for (const step of steps) await store.append('WorkflowTemplates', templateRecord(step));
+  await store.appendRows('WorkflowTemplates', steps.map(templateRecord));
   added += steps.length;
 }
 console.log(added ? `Added ${added} workflow steps.` : 'All default workflows already exist; no rows added.');
