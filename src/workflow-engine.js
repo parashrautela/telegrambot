@@ -5,23 +5,69 @@
 import { TRADE_ORDER, residentialInteriorDefinitions } from './residential-interior.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const STARTED_STATUSES = new Set(['In Progress', 'Completed', 'Delay Requested', 'Delayed — Approved', 'Issue Reported', 'On hold']);
+// Delay statuses describe a request, not progress. Treating them as "started" froze delayed tasks in place.
+const STARTED_STATUSES = new Set(['In Progress', 'Completed', 'Issue Reported', 'On hold']);
+const EDGE_TYPES = new Set(['FS', 'SS']);
 
 const parseDate = (value) => {
-  if (!value) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return null;
   const date = new Date(`${value}T00:00:00Z`);
-  return Number.isNaN(date.getTime()) ? null : date;
+  // Reject impossible days such as 2026-02-30 instead of rolling them into the next month.
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;
 };
 const formatDate = (date) => (date ? date.toISOString().slice(0, 10) : '');
+const readableDate = (date) => date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 const addDays = (date, days) => new Date(date.getTime() + days * DAY_MS);
 const daySpan = (start, end) => Math.round((end.getTime() - start.getTime()) / DAY_MS);
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+// Accepts 2026-09-20, "20 September", "Sep 20" or "20 Sep 2026". Ambiguous forms such as 5/1 or "tomorrow" are rejected.
+export function parseUserDate(input, today = new Date()) {
+  const text = String(input || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return parseDate(text) ? text : null;
+  const match = text.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]+)\.?,?(?:\s+(\d{4}))?$/i)
+    || text.match(/^([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?(?:\s+(\d{4}))?$/i);
+  if (!match) return null;
+  const [day, monthName] = /^\d/.test(match[1]) ? [match[1], match[2]] : [match[2], match[1]];
+  const month = MONTHS.indexOf(monthName.slice(0, 3).toLowerCase());
+  if (month < 0 || (monthName.length > 3 && !/^(january|february|march|april|may|june|july|august|september|october|november|december|sept)$/i.test(monthName))) return null;
+  const build = (year) => `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  if (match[3]) return parseDate(build(match[3])) ? build(match[3]) : null;
+  const thisYear = today.getUTCFullYear();
+  const candidate = parseDate(build(thisYear));
+  if (!candidate) return null;
+  // Without a year, a date more than six months back almost always means next year.
+  return candidate.getTime() < today.getTime() - 182 * DAY_MS && parseDate(build(thisYear + 1)) ? build(thisYear + 1) : build(thisYear);
+}
+
+// Legacy plans store only planned/current dates. Seeding the forecast from them lets one delay engine serve every plan.
+export function withForecastDefaults(tasks) {
+  return tasks.map((task) => ({
+    ...task,
+    ForecastStart: task.ForecastStart || task.CurrentStart || task.PlannedStart || '',
+    ForecastEnd: task.ForecastEnd || task.CurrentEnd || task.PlannedEnd || '',
+  }));
+}
+
+const CLOSED_STATUS = /^(Archived|Cancelled|Closed)/;
+
+// Project finish from forecasts. Unconfirmed when any open task is undated.
+export function projectedFinish(tasks) {
+  const open = tasks.filter((task) => !CLOSED_STATUS.test(task.Status || ''));
+  const ends = open.map((task) => parseDate(task.ForecastEnd || task.CurrentEnd || task.PlannedEnd));
+  if (!ends.length || ends.some((end) => !end)) return '';
+  return formatDate(ends.reduce((latest, date) => (date > latest ? date : latest)));
+}
 
 export function parseDependencyField(dependencySequences = '', predecessorTemplateId = '') {
   const raw = String(dependencySequences || '').trim();
   if (raw) {
-    return raw.split(',').filter(Boolean).map((part) => {
+    return raw.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
       const [sequence, type = 'FS'] = part.split(':');
-      return { sequence: sequence.trim(), type: type.trim() || 'FS' };
+      const edgeType = type.trim().toUpperCase() || 'FS';
+      if (!EDGE_TYPES.has(edgeType)) throw new Error(`Unsupported dependency type "${type.trim()}" on sequence ${sequence.trim()}. Use FS or SS.`);
+      return { sequence: sequence.trim(), type: edgeType };
     });
   }
   if (predecessorTemplateId) return [{ sequence: String(predecessorTemplateId).trim(), type: 'FS' }];
@@ -74,7 +120,12 @@ function durationOf(definition, durationBySequence) {
 export function scheduleDefinitions(definitions, { startDate, durationBySequence = {} } = {}) {
   const start = parseDate(startDate);
   if (!start) throw new Error('Start date must use YYYY-MM-DD.');
-  const bySequence = new Map(definitions.map((definition) => [String(definition.sequence), definition]));
+  const bySequence = new Map();
+  for (const definition of definitions) {
+    const sequence = String(definition.sequence);
+    if (bySequence.has(sequence)) throw new Error(`Duplicate template sequence ${sequence}`);
+    bySequence.set(sequence, definition);
+  }
   const memo = new Map();
 
   function visit(sequence, stack) {
@@ -112,7 +163,8 @@ export function scheduleDefinitions(definitions, { startDate, durationBySequence
     return { ...definition, ...dates };
   });
   const ends = scheduled.map((task) => task.forecastEnd).filter(Boolean);
-  const targetEndDate = ends.length ? formatDate(ends.reduce((latest, date) => (date > latest ? date : latest))) : '';
+  // A finish date is only meaningful when every task is dated. A partial plan stays unconfirmed.
+  const targetEndDate = ends.length && ends.length === scheduled.length ? formatDate(ends.reduce((latest, date) => (date > latest ? date : latest))) : '';
   return { tasks: scheduled.map((task) => ({ ...task, forecastStart: formatDate(task.forecastStart), forecastEnd: formatDate(task.forecastEnd) })), targetEndDate };
 }
 
@@ -158,9 +210,9 @@ export function buildScheduledTasks(sheetRows, { startDate, taskIdPrefix }) {
 export function dependencyEdges(task) {
   const raw = String(task.PredecessorTaskIDs || '').trim();
   if (raw) {
-    return raw.split(',').filter(Boolean).map((part) => {
+    return raw.split(',').map((part) => part.trim()).filter(Boolean).map((part) => {
       const [id, type = 'FS'] = part.split(':');
-      return { id, type };
+      return { id: id.trim(), type: type.trim().toUpperCase() || 'FS' };
     });
   }
   if (task.PredecessorTaskID) return [{ id: task.PredecessorTaskID, type: 'FS' }];
@@ -178,6 +230,7 @@ export function completionBlockReason(task, projectTasks, revisions = []) {
   for (const edge of dependencyEdges(task)) {
     const predecessor = byId.get(edge.id);
     if (!predecessor) return `Missing predecessor ${edge.id}`;
+    if (!EDGE_TYPES.has(edge.type)) return `Unsupported dependency type ${edge.type} on ${predecessor.TaskName}`;
     if (predecessor.Status === 'On hold' || predecessor.ApprovalStatus === 'On hold') return `${predecessor.TaskName} is on hold`;
     if (edge.type === 'FS' && predecessor.Status !== 'Completed') return `Waiting for ${predecessor.TaskName} to finish`;
     if (edge.type === 'SS' && !isStarted(predecessor) && predecessor.Status !== 'Completed') return `Waiting for ${predecessor.TaskName} to start`;
@@ -202,8 +255,8 @@ export function forecastDelayImpact(tasks, delayedTaskId, delayDays) {
   const shiftForecast = (task, moveStart) => {
     const previousStart = task.ForecastStart;
     const previousEnd = task.ForecastEnd;
-    if (task.ForecastEnd) task.ForecastEnd = formatDate(addDays(parseDate(task.ForecastEnd), days));
-    if (moveStart && task.ForecastStart) task.ForecastStart = formatDate(addDays(parseDate(task.ForecastStart), days));
+    if (parseDate(task.ForecastEnd)) task.ForecastEnd = formatDate(addDays(parseDate(task.ForecastEnd), days));
+    if (moveStart && parseDate(task.ForecastStart)) task.ForecastStart = formatDate(addDays(parseDate(task.ForecastStart), days));
     return { previousStart, previousEnd };
   };
 
@@ -235,7 +288,17 @@ export function forecastDelayImpact(tasks, delayedTaskId, delayDays) {
     }
   }
 
-  for (const taskId of downstream) {
+  // Recalculate predecessors before successors so results do not depend on sheet row order.
+  const ordered = [];
+  const placed = new Set();
+  while (ordered.length < downstream.size) {
+    const ready = [...downstream].filter((taskId) => !placed.has(taskId)
+      && dependencyEdges(byId.get(taskId)).every((edge) => !downstream.has(edge.id) || placed.has(edge.id)));
+    if (!ready.length) throw new Error('Dependency cycle among downstream tasks.');
+    for (const taskId of ready) { placed.add(taskId); ordered.push(taskId); }
+  }
+
+  for (const taskId of ordered) {
     const task = byId.get(taskId);
     const previousStart = task.ForecastStart;
     const previousEnd = task.ForecastEnd;
@@ -255,13 +318,13 @@ export function forecastDelayImpact(tasks, delayedTaskId, delayDays) {
     for (const edge of dependencyEdges(task)) {
       const predecessor = byId.get(edge.id);
       const forecastDate = edge.type === 'SS' ? predecessor?.ForecastStart : predecessor?.ForecastEnd;
-      if (!forecastDate) {
+      if (!parseDate(forecastDate)) {
         missing = true;
         break;
       }
       anchors.push(edge.type === 'SS' ? parseDate(forecastDate) : addDays(parseDate(forecastDate), 1));
     }
-    if (missing || !anchors.length || !previousStart || !previousEnd) {
+    if (missing || !anchors.length || !parseDate(previousStart) || !parseDate(previousEnd)) {
       affected.push({
         taskId: task.TaskID,
         taskName: task.TaskName,
@@ -272,7 +335,8 @@ export function forecastDelayImpact(tasks, delayedTaskId, delayDays) {
       });
       continue;
     }
-    const nextStart = anchors.reduce((latest, date) => (date > latest ? date : latest));
+    // A delay only pushes work later. Keeping the current forecast as a floor preserves earlier delays.
+    const nextStart = anchors.reduce((latest, date) => (date > latest ? date : latest), parseDate(previousStart));
     const span = daySpan(parseDate(previousStart), parseDate(previousEnd));
     task.ForecastStart = formatDate(nextStart);
     task.ForecastEnd = formatDate(addDays(nextStart, span));
@@ -288,6 +352,96 @@ export function forecastDelayImpact(tasks, delayedTaskId, delayDays) {
   }
 
   return { tasks: copies, affected };
+}
+
+// Founder moves from the web timeline: drag, resize or swap. Each move sets a task's new start and end.
+// Moved tasks must still respect their own predecessors. Successors are pushed later when needed, never pulled earlier.
+export function rescheduleTasks(tasks, moves, { enforce = true } = {}) {
+  const copies = withForecastDefaults(tasks);
+  const byId = new Map(copies.map((task) => [task.TaskID, task]));
+  const before = new Map(copies.map((task) => [task.TaskID, { start: task.ForecastStart, end: task.ForecastEnd }]));
+  const conflicts = [];
+  const movedIds = new Set();
+  // forecastOnly moves (used by undo) restore a pushed successor without making it a committed plan change.
+  const committedIds = new Set(moves.filter((move) => !move.forecastOnly).map((move) => move.taskId));
+  for (const move of moves) {
+    const task = byId.get(move.taskId);
+    const start = parseDate(move.start);
+    const end = parseDate(move.end);
+    if (!task) { conflicts.push({ taskId: move.taskId, reason: 'Task not found.' }); continue; }
+    if (!start || !end || end < start) { conflicts.push({ taskId: task.TaskID, taskName: task.TaskName, reason: 'Choose a start on or before the end.' }); continue; }
+    if (enforce && (task.Status === 'Completed' || CLOSED_STATUS.test(task.Status || ''))) { conflicts.push({ taskId: task.TaskID, taskName: task.TaskName, reason: `${task.TaskName} is ${task.Status} and cannot be moved.` }); continue; }
+    task.ForecastStart = formatDate(start);
+    task.ForecastEnd = formatDate(end);
+    movedIds.add(task.TaskID);
+  }
+  if (enforce) {
+    for (const taskId of movedIds) {
+      const task = byId.get(taskId);
+      for (const edge of dependencyEdges(task)) {
+        const predecessor = byId.get(edge.id);
+        if (!predecessor || CLOSED_STATUS.test(predecessor.Status || '')) continue;
+        const anchorDate = edge.type === 'SS' ? parseDate(predecessor.ForecastStart) : (parseDate(predecessor.ForecastEnd) && addDays(parseDate(predecessor.ForecastEnd), 1));
+        if (anchorDate && parseDate(task.ForecastStart) < anchorDate) {
+          conflicts.push({ taskId, taskName: task.TaskName, reason: `${task.TaskName} cannot start before ${readableDate(anchorDate)}: it waits for ${predecessor.TaskName} to ${edge.type === 'SS' ? 'start' : 'finish'}.` });
+        }
+      }
+    }
+  }
+  const warnings = [];
+  if (!conflicts.length) {
+    const ordered = topologicalOrder(copies, byId);
+    for (const taskId of ordered) {
+      if (movedIds.has(taskId)) continue;
+      const task = byId.get(taskId);
+      const start = parseDate(task.ForecastStart);
+      const end = parseDate(task.ForecastEnd);
+      if (!start || !end) continue;
+      const anchors = dependencyEdges(task).map((edge) => {
+        const predecessor = byId.get(edge.id);
+        if (!predecessor) return null;
+        return edge.type === 'SS' ? parseDate(predecessor.ForecastStart) : (parseDate(predecessor.ForecastEnd) && addDays(parseDate(predecessor.ForecastEnd), 1));
+      }).filter(Boolean);
+      const earliest = anchors.reduce((latest, date) => (date > latest ? date : latest), start);
+      if (earliest <= start) continue;
+      if (isStarted(task)) {
+        warnings.push({ taskId, taskName: task.TaskName, reason: `${task.TaskName} has already started, so it was not moved. It now overlaps work it depends on.` });
+        continue;
+      }
+      const span = daySpan(start, end);
+      task.ForecastStart = formatDate(earliest);
+      task.ForecastEnd = formatDate(addDays(earliest, span));
+    }
+  }
+  const affected = conflicts.length ? [] : copies.filter((task) => {
+    const previous = before.get(task.TaskID);
+    return previous.start !== task.ForecastStart || previous.end !== task.ForecastEnd;
+  }).map((task) => ({
+    taskId: task.TaskID,
+    taskName: task.TaskName,
+    moved: movedIds.has(task.TaskID),
+    committed: committedIds.has(task.TaskID),
+    previousStart: before.get(task.TaskID).start,
+    previousEnd: before.get(task.TaskID).end,
+    forecastStart: task.ForecastStart,
+    forecastEnd: task.ForecastEnd,
+  }));
+  return { ok: !conflicts.length, conflicts, warnings, affected, tasks: copies, finish: conflicts.length ? '' : projectedFinish(copies) };
+}
+
+function topologicalOrder(tasks, byId) {
+  const ordered = [];
+  const state = new Map();
+  const visit = (taskId) => {
+    if (state.get(taskId) === 'done') return;
+    if (state.get(taskId) === 'visiting') throw new Error(`Dependency cycle at ${taskId}`);
+    state.set(taskId, 'visiting');
+    for (const edge of dependencyEdges(byId.get(taskId))) if (byId.has(edge.id)) visit(edge.id);
+    state.set(taskId, 'done');
+    ordered.push(taskId);
+  };
+  for (const task of tasks) visit(task.TaskID);
+  return ordered;
 }
 
 export function procurementRisks(tasks) {

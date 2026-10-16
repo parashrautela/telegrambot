@@ -29,6 +29,7 @@ test('web bridge assigns a group role and creates a linked project shell', async
     onboardingForMember: async () => null,
     append: async (sheet, row) => { if (sheet === 'Projects') projects.push({ ...row, rowNumber: 2 }); if(sheet==='Tasks')tasks.push({...row,rowNumber:tasks.length+2}); },
     updateRow: async (sheet, number, changes) => Object.assign((sheet==='DecisionRequests'?requests:sheet==='Tasks'?tasks:projects).find((row)=>row.rowNumber===number),changes),
+    updateRows: async (sheet, list) => { for (const { rowNumber, changes } of list) Object.assign((sheet==='Tasks'?tasks:projects).find((row)=>row.rowNumber===rowNumber),changes); },
     audit: async () => {}, markGroupLinked: async () => {},
   };
   const sent = [];
@@ -82,6 +83,65 @@ test('web bridge assigns a group role and creates a linked project shell', async
   } finally {
     await new Promise((resolve) => server.close(resolve));
     globalThis.fetch = prior.fetch;
+    if (prior.secret === undefined) delete process.env.INTEGRATION_SHARED_SECRET; else process.env.INTEGRATION_SHARED_SECRET = prior.secret;
+    if (prior.port === undefined) delete process.env.BOT_BRIDGE_PORT; else process.env.BOT_BRIDGE_PORT = prior.port;
+  }
+});
+
+test('web timeline moves are previewed, applied to the sheet, and protected against stale views', async () => {
+  const prior = { secret: process.env.INTEGRATION_SHARED_SECRET, port: process.env.BOT_BRIDGE_PORT };
+  process.env.INTEGRATION_SHARED_SECRET = 'test-secret';
+  process.env.BOT_BRIDGE_PORT = String(await freePort());
+  const project = { ProjectID: 'P001', GroupChatID: '-456', WebManaged: 'Yes', TargetEndDate: '2026-03-07', rowNumber: 2 };
+  const tasks = [
+    { TaskID: 'P001-T1', ProjectID: 'P001', TaskName: 'Drawings', Stage: 'Design', Status: 'Pending', PlannedStart: '2026-03-01', PlannedEnd: '2026-03-03', ForecastStart: '2026-03-01', ForecastEnd: '2026-03-03', rowNumber: 2 },
+    { TaskID: 'P001-T2', ProjectID: 'P001', TaskName: 'Carpentry', Stage: 'Site', Status: 'Pending', PlannedStart: '2026-03-04', PlannedEnd: '2026-03-07', ForecastStart: '2026-03-04', ForecastEnd: '2026-03-07', PredecessorTaskIDs: 'P001-T1:FS', rowNumber: 3 },
+  ];
+  const audits = []; let batches = 0;
+  const store = {
+    projectForGroup: async (id) => (id === '-456' ? project : undefined),
+    rows: async (sheet) => (sheet === 'Tasks' ? tasks : []),
+    tasksForProject: async () => tasks.map((task) => ({ ...task })),
+    updateRows: async (sheet, list) => { batches += 1; for (const { rowNumber, changes } of list) Object.assign(tasks.find((row) => row.rowNumber === rowNumber), changes); },
+    updateRow: async (sheet, rowNumber, changes) => Object.assign(sheet === 'Projects' ? project : tasks.find((row) => row.rowNumber === rowNumber), changes),
+    audit: async (entry) => audits.push(entry),
+  };
+  const server = startWebBridge({ store, token: 'bot-token', founderTelegramId: '7' });
+  const post = async (route, payload) => {
+    const response = await fetch(`http://127.0.0.1:${process.env.BOT_BRIDGE_PORT}${route}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer test-secret' }, body: JSON.stringify(payload) });
+    return { status: response.status, body: await response.json() };
+  };
+  try {
+    const move = { taskId: 'P001-T1', start: '2026-03-02', end: '2026-03-05', fromStart: '2026-03-01', fromEnd: '2026-03-03' };
+    const preview = await post('/api/integrations/web/schedule/preview', { groupChatId: '-456', moves: [move] });
+    assert.equal(preview.status, 200);
+    assert.deepEqual(preview.body.affected.map((item) => [item.taskId, item.forecastStart, item.forecastEnd]), [['P001-T1', '2026-03-02', '2026-03-05'], ['P001-T2', '2026-03-06', '2026-03-09']]);
+    assert.equal(tasks[0].ForecastEnd, '2026-03-03', 'preview writes nothing');
+
+    const blocked = await post('/api/integrations/web/schedule/apply', { groupChatId: '-456', moves: [{ taskId: 'P001-T2', start: '2026-03-02', end: '2026-03-05' }] });
+    assert.equal(blocked.status, 409);
+    assert.match(blocked.body.error, /waits for Drawings to finish/);
+
+    const applied = await post('/api/integrations/web/schedule/apply', { groupChatId: '-456', moves: [move], actorName: 'Founder' });
+    assert.equal(applied.status, 200);
+    assert.equal(batches, 1, 'one batched sheet write');
+    assert.deepEqual([tasks[0].CurrentStart, tasks[0].CurrentEnd, tasks[0].PlannedEnd], ['2026-03-02', '2026-03-05', '2026-03-03'], 'baseline kept');
+    assert.deepEqual([tasks[1].ForecastStart, tasks[1].ForecastEnd, tasks[1].CurrentEnd], ['2026-03-06', '2026-03-09', undefined], 'successor forecast only');
+    assert.equal(project.TargetEndDate, '2026-03-09');
+    assert.equal(audits[0].action, 'Schedule changed');
+    assert.match(audits[0].details, /1 dependent task\(s\) also moved/);
+
+    const stale = await post('/api/integrations/web/schedule/apply', { groupChatId: '-456', moves: [move] });
+    assert.equal(stale.status, 409);
+    assert.match(stale.body.error, /changed since you opened it/);
+
+    const sync = await post('/api/integrations/web/tasks/sync', { groupChatId: '-456', updates: [{ taskId: 'P001-T1', title: 'Drawings', stage: 'Design', status: 'Pending', deadline: '2026-03-06', assigneeTelegramId: '', assigneeName: '' }] });
+    assert.equal(sync.status, 200);
+    assert.deepEqual([tasks[0].ForecastEnd, tasks[0].PlannedEnd, tasks[1].ForecastStart], ['2026-03-06', '2026-03-03', '2026-03-07'], 'deadline edit reschedules and keeps baseline');
+    assert.equal((await post('/api/integrations/web/tasks/sync', { groupChatId: '-456', updates: [{ taskId: 'P001-T1', title: 'Drawings', stage: 'Design', status: 'Pending', deadline: '', assigneeTelegramId: '', assigneeName: '' }] })).status, 200);
+    assert.equal(tasks[0].ForecastEnd, '2026-03-06', 'blank deadline never wipes dates');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
     if (prior.secret === undefined) delete process.env.INTEGRATION_SHARED_SECRET; else process.env.INTEGRATION_SHARED_SECRET = prior.secret;
     if (prior.port === undefined) delete process.env.BOT_BRIDGE_PORT; else process.env.BOT_BRIDGE_PORT = prior.port;
   }

@@ -66,6 +66,9 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
   const targetEndDate = graphTemplate
     ? ''
     : dateText(plusDays(startDate, workflow.reduce((total, template) => total + Number(template.DurationDays), 0) - 1));
+  const taskIdPrefix = existingTasks.length ? `${project.ProjectID}-${workflowId.split('-')[0]}` : project.ProjectID;
+  // Build the graph before archiving anything, so an invalid template cannot leave the project with no tasks.
+  const scheduled = graphTemplate ? buildScheduledTasks(workflow, { startDate: project.StartDate, taskIdPrefix }) : null;
   if (replaceUntouchedLegacyPlan) {
     for (const task of existingTasks) {
       await store.updateRow('Tasks', task.rowNumber, {
@@ -76,10 +79,8 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
       });
     }
   }
-  const taskIdPrefix = existingTasks.length ? `${project.ProjectID}-${workflowId.split('-')[0]}` : project.ProjectID;
   let scheduledTargetEnd = targetEndDate;
-  if (graphTemplate) {
-    const scheduled = buildScheduledTasks(workflow, { startDate: project.StartDate, taskIdPrefix });
+  if (scheduled) {
     scheduledTargetEnd = scheduled.targetEndDate;
     for (const task of scheduled.tasks) {
       await store.append('Tasks', {

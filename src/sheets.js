@@ -95,7 +95,15 @@ export class SheetStore {
         for (const step of steps) await this.append('WorkflowTemplates', templateRecord(step));
         continue;
       }
-      if (steps.some((step) => step[9])) continue;
+      if (steps.some((step) => step[9])) {
+        // Fill only blank durations from the code template. Values founders typed into the sheet always win.
+        const fills = existing.filter((row) => row.WorkflowID === workflowId && String(row.DurationDays ?? '').trim() === '').flatMap((row) => {
+          const step = steps.find((item) => String(item[1]) === String(row.Sequence));
+          return step && step[4] !== '' && step[4] !== undefined ? [{ rowNumber: row.rowNumber, changes: { DurationDays: String(step[4]) } }] : [];
+        });
+        await this.updateRows('WorkflowTemplates', fills);
+        continue;
+      }
       const workflowRows = existing.filter((row) => row.WorkflowID === workflowId);
       const resourceStep = steps.find((step) => Number(step[1]) === 5);
       if (resourceStep && !workflowRows.some((row) => Number(row.Sequence) === 5)) {
@@ -113,8 +121,9 @@ export class SheetStore {
     const response = await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}`);
     const values = response.values ?? [];
     const [headers = [], ...data] = values;
-    return data.filter((row) => row.some(Boolean)).map((row, index) => ({
-      rowNumber: index + 2,
+    // Number rows before skipping blanks so writes target the physical sheet row.
+    return data.map((row, index) => ({ row, rowNumber: index + 2 })).filter(({ row }) => row.some(Boolean)).map(({ row, rowNumber }) => ({
+      rowNumber,
       ...Object.fromEntries(headers.map((header, column) => [header, row[column] ?? ''])),
     }));
   }
@@ -125,6 +134,18 @@ export class SheetStore {
     await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=${raw ? 'RAW' : 'USER_ENTERED'}&insertDataOption=INSERT_ROWS`, {
       method: 'POST', body: JSON.stringify({ values: [values] }),
     });
+  }
+
+  // One API call for many rows. Delay propagation and web syncs touch dozens of rows; per-row calls hit the Sheets quota.
+  async updateRows(sheetName, rowChanges) {
+    const headers = SHEETS[sheetName];
+    const data = rowChanges.flatMap(({ rowNumber, changes }) => Object.entries(changes).map(([field, value]) => {
+      const column = headers.indexOf(field);
+      if (column < 0) throw new Error(`Unknown ${sheetName} field: ${field}`);
+      return { range: `${sheetName}!${columnLetter(column)}${rowNumber}`, values: [[value]] };
+    }));
+    if (!data.length) return;
+    await this.request('/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }) });
   }
 
   async updateRow(sheetName, rowNumber, changes) {

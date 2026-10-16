@@ -1,11 +1,40 @@
 // Residential interior template from the implementation plan.
-// Dependencies are explicit. Blank durations stay blank: calendar type,
-// the three-month design window, and procurement lead times are unconfirmed.
+// Dependencies are explicit. Durations come from the founders' Google Sheet workflows (see SHEET_DURATIONS).
+// Founders can change any duration in the WorkflowTemplates tab; the bot only fills blanks.
 // Named people are not stored as assignees.
 
 export const TRADE_ORDER = ['Civil', 'Carpentry', 'Plumbing', 'Electrical', 'Tiling'];
 
 const WORKFLOW_ID = 'RESIDENTIAL-INTERIOR-V1';
+
+// Calendar days per step, taken from the founders' WORKFLOWS sheet (imported 14 Oct 2026):
+// - Civil, Plumbing, Electrical: "Residential Interior" plan (site check 3, drawings 4, execution 7, final check 4).
+// - Carpentry: "INTERIOR 1" Carpentering_Wall (site check 1, drawing 4, execution 20, final check 2).
+// - Tiling: "INTERIOR 1" Flooring (site check 2, drawing 2, execution 5, final check 2).
+// - Resources: "INTERIOR 1" Existing resources (1).
+// Procurement is agreed with the founders: presentation 2, and the sheet's 7-day
+// "Selection and site delivery" split into selection 3, order 2, on-site readiness 2.
+// "Design phase complete" is a 1-day review.
+const TRADE_DAYS = {
+  Civil: { siteCheck: 3, drawings: 4, execution: 7, finalCheck: 4 },
+  Carpentry: { siteCheck: 1, drawings: 4, execution: 20, finalCheck: 2 },
+  Plumbing: { siteCheck: 3, drawings: 4, execution: 7, finalCheck: 4 },
+  Electrical: { siteCheck: 3, drawings: 4, execution: 7, finalCheck: 4 },
+  Tiling: { siteCheck: 2, drawings: 2, execution: 5, finalCheck: 2 },
+};
+const PROCUREMENT_DAYS = [2, 3, 2, 2];
+
+function sheetDuration(sequence) {
+  if (sequence === 5) return 1;
+  if (sequence === 90) return 1;
+  const trade = (offset) => TRADE_ORDER[(sequence - offset) / 10];
+  if (sequence >= 10 && sequence <= 50) return TRADE_DAYS[trade(10)].drawings;
+  if (sequence >= 110 && sequence <= 150) return TRADE_DAYS[trade(110)].siteCheck;
+  if (sequence >= 300 && sequence < 400) return PROCUREMENT_DAYS[sequence % 10];
+  if (sequence >= 400 && sequence <= 440) return TRADE_DAYS[trade(400)].execution;
+  if (sequence >= 500 && sequence <= 540) return TRADE_DAYS[trade(500)].finalCheck;
+  return '';
+}
 
 function definition(fields) {
   return {
@@ -51,7 +80,7 @@ export function residentialInteriorDefinitions() {
   rows.push(definition({
     sequence: 90,
     stage: 'Design',
-    taskName: 'Design phase complete (duration target unconfirmed)',
+    taskName: 'Design phase complete',
     defaultRole: 'Design Head',
     predecessors: TRADE_ORDER.map((_, index) => ({ sequence: 10 + index * 10, type: 'FS' })),
     milestone: 'Yes',
@@ -147,7 +176,7 @@ export function residentialInteriorDefinitions() {
     }));
   });
 
-  return rows.map((row) => ({ ...row, sequence: String(row.sequence), predecessors: row.predecessors.map((edge) => ({ ...edge, sequence: String(edge.sequence) })) }));
+  return rows.map((row) => ({ ...row, durationDays: row.durationDays === '' ? sheetDuration(row.sequence) : row.durationDays, sequence: String(row.sequence), predecessors: row.predecessors.map((edge) => ({ ...edge, sequence: String(edge.sequence) })) }));
 }
 
 export function residentialInteriorTuples() {

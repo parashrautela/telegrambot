@@ -5,7 +5,7 @@ import { captureDecisionRequest, parseDecisionRequest, parseClientRequest, syncC
 import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
-import { applyReviewDecision, completionBlockReason, createDraftRevision, dependencyEdges, forecastDelayImpact, previewTradeOrderOverride, resolveDrawing } from './workflow-engine.js';
+import { applyReviewDecision, completionBlockReason, createDraftRevision, dependencyEdges, forecastDelayImpact, parseUserDate, previewTradeOrderOverride, projectedFinish, resolveDrawing, withForecastDefaults } from './workflow-engine.js';
 import { answerCallback, getChatAdministrators, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto } from './telegram.js';
 import { archiveProjectResource } from './drive-storage.js';
 import { retryProjectResources } from './project-resources.js';
@@ -163,12 +163,7 @@ console.log(`Founder bot connected as @${leaderBotProfile.username}; founder Tel
 await store.ensureSchema();
 await store.seedDefaultWorkflows();
 
-const parseDate = (input) => {
-  const trimmed = input.trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed) && !Number.isNaN(new Date(`${trimmed}T00:00:00Z`).getTime())) return trimmed;
-  const withCurrentYear = new Date(`${trimmed} ${new Date().getUTCFullYear()} UTC`);
-  return Number.isNaN(withCurrentYear.getTime()) ? null : withCurrentYear.toISOString().slice(0, 10);
-};
+const parseDate = (input) => parseUserDate(input);
 
 async function nextProjectId() {
   const projectIds = (await store.rows('Projects')).map((project) => project.ProjectID);
@@ -423,6 +418,8 @@ async function verifyAssigned(task, from, token, chatId) {
 }
 
 async function submitDelay({ project, task, user, days, reason, groupChatId }) {
+  if (task.Status === 'Completed' || /^(Archived|Cancelled|Closed)/.test(task.Status || '')) return sendMessage(config.groupToken, groupChatId, `<b>${escape(task.TaskName)}</b> is ${escape(task.Status)}, so it cannot be delayed.`);
+  if (task.Status === 'Delay Requested') return sendMessage(config.groupToken, groupChatId, `A delay for <b>${escape(task.TaskName)}</b> is already waiting for approval.`);
   const approvalId = await store.requestDelay({ project, task, actor: user, days, reason });
   const approverTelegramId = project.LeaderTelegramID || config.founderTelegramId;
   await sendMessage(config.groupToken, groupChatId, `⏳ Delay request sent for approval: <b>${escape(task.TaskName)}</b> — ${days} day(s).`);
@@ -504,9 +501,9 @@ async function groupCommand(message) {
     return;
   }
   if (command === '/tasks') {
-    const tasks = (await store.tasksForProject(project.ProjectID)).filter((task) => !['Completed', 'Archived'].includes(task.Status));
+    const tasks = (await store.tasksForProject(project.ProjectID)).filter((task) => task.Status !== 'Completed' && !/^(Archived|Cancelled|Closed)/.test(task.Status || ''));
     if (!tasks.length) return sendMessage(config.groupToken, message.chat.id, 'No active tasks are currently recorded for this project.');
-    const lines = tasks.slice(0, 12).map((task) => `• <code>${task.TaskID}</code> — <b>${escape(task.TaskName)}</b>\n  ${escape(task.Status || 'Pending')} · ${escape(task.AssignedName || task.AssignedRole || 'Unassigned')} · ${escape(task.CurrentEnd || task.PlannedEnd || 'No date')}`);
+    const lines = tasks.slice(0, 12).map((task) => `• <code>${task.TaskID}</code> — <b>${escape(task.TaskName)}</b>\n  ${escape(task.Status || 'Pending')} · ${escape(task.AssignedName || task.AssignedRole || 'Unassigned')} · ${escape(task.ForecastEnd || task.CurrentEnd || task.PlannedEnd || 'No date')}`);
     return sendMessage(config.groupToken, message.chat.id, `<b>${escape(project.ProjectName)} — active tasks</b>\n\n${lines.join('\n\n')}\n\nUse /done TASK_ID, /delay TASK_ID DAYS reason, or /issue TASK_ID description.`);
   }
   if (command === '/ai') {
@@ -951,18 +948,20 @@ async function leaderCallback(callback) {
   if (!isFounder && !isProjectLead) return answerCallback(config.leaderToken, callback.id, 'Only the founder or project lead can decide.');
   const task = await store.task(approval.TaskID);
   const status = decision === 'approve' ? 'Approved' : 'Rejected';
-  const forecast = decision === 'approve' && task.TemplateVersion
-    ? forecastDelayImpact(await store.tasksForProject(task.ProjectID), task.TaskID, Number(approval.DelayDays))
-    : null;
+  // Every plan goes through the engine. Legacy rows get their forecast seeded from current dates first.
+  const seeded = decision === 'approve' ? withForecastDefaults(await store.tasksForProject(task.ProjectID)) : [];
+  const forecast = decision === 'approve' ? forecastDelayImpact(seeded, task.TaskID, Number(approval.DelayDays)) : null;
   await store.updateRow('Approvals', approval.rowNumber, { Status: status, DecidedAt: new Date().toISOString(), DecidedByTelegramID: String(callback.from.id) });
   await store.updateRow('Tasks', task.rowNumber, { Status: decision === 'approve' ? 'Delayed — Approved' : 'Delay Rejected', ApprovalStatus: status, LastUpdatedAt: new Date().toISOString(), LastUpdatedBy: String(callback.from.id) });
   if (forecast) {
-    const currentTasks = await store.tasksForProject(task.ProjectID);
-    for (const updated of forecast.tasks) {
-      const current = currentTasks.find((item) => item.TaskID === updated.TaskID);
-      if (!current || (current.ForecastStart === updated.ForecastStart && current.ForecastEnd === updated.ForecastEnd)) continue;
-      await store.updateRow('Tasks', current.rowNumber, { ForecastStart: updated.ForecastStart, ForecastEnd: updated.ForecastEnd });
-    }
+    const before = new Map(seeded.map((item) => [item.TaskID, item]));
+    const changed = forecast.tasks.filter((updated) => {
+      const previous = before.get(updated.TaskID);
+      return previous.ForecastStart !== updated.ForecastStart || previous.ForecastEnd !== updated.ForecastEnd;
+    });
+    await store.updateRows('Tasks', changed.map((updated) => ({ rowNumber: before.get(updated.TaskID).rowNumber, changes: { ForecastStart: updated.ForecastStart, ForecastEnd: updated.ForecastEnd } })));
+    const finish = projectedFinish(forecast.tasks);
+    if (finish && project && finish !== project.TargetEndDate) await store.updateRow('Projects', project.rowNumber, { TargetEndDate: finish });
   }
   await store.audit({ projectId: approval.ProjectID, taskId: task.TaskID, action: `Delay ${status.toLowerCase()}`, oldValue: 'Delay Requested', newValue: status, actor: callback.from.id, actorName: actor(callback.from).name, source: 'Telegram leader bot', details: approval.Reason });
   await answerCallback(config.leaderToken, callback.id, `Delay ${status.toLowerCase()}.`);
