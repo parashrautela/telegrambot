@@ -74,7 +74,8 @@ test('persisted request sync retries failures and stops after acknowledged deliv
   await retryDecisionRequestSync(store); assert.equal(count,2);
 });
 test('/query and /update are the group tags; plain team chat is ignored', () => {
-  assert.equal(parseDecisionRequest({ ...message, text: '/query When does tiling start?' }, 'our_bot').RequestType, 'Question');
+  const query = parseDecisionRequest({ ...message, text: '/query When does tiling start?' }, 'our_bot');
+  assert.deepEqual([query.RequestType, query.RequestID], ['Question', 'REQ--123-10-question']);
   assert.equal(parseDecisionRequest({ ...message, text: '/update@our_bot Walls done' }, 'our_bot').RequestType, 'Update');
   const photo = parseDecisionRequest({ ...message, text: undefined, caption: '/update Plaster finished', photo: [{ file_id: 'a' }, { file_id: 'b' }] }, 'our_bot');
   assert.equal(photo.OriginalMessage, 'Plaster finished');

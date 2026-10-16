@@ -19,13 +19,15 @@ export function parseDecisionRequest(message, botUsername) {
   if (!originalText && !attachments.length && !context) {
     throw new Error('Reply to a message with /query or /update, or add your message after the command.');
   }
+  // /query is stored as a Question, so the ID suffix follows the type the web app validates against.
+  const requestType = { approval: 'Approval', update: 'Update' }[match[1].toLowerCase()] || 'Question';
   return {
-    RequestID: `REQ-${message.chat.id}-${original.message_id}-${match[1].toLowerCase()}`,
+    RequestID: `REQ-${message.chat.id}-${original.message_id}-${requestType.toLowerCase()}`,
     GroupChatID: String(message.chat.id), SourceMessageID: String(original.message_id),
     CommandMessageID: String(message.message_id), RequestedByTelegramID: String(message.from?.id || ''),
     RequestedByName: name(message.from), OriginalSenderTelegramID: String(original.from?.id || original.sender_chat?.id || ''),
     OriginalSenderName: original.sender_chat?.title || name(original.from),
-    RequestType: { approval: 'Approval', update: 'Update' }[match[1].toLowerCase()] || 'Question',
+    RequestType: requestType,
     OriginalMessage: originalText, RequestContext: message.reply_to_message ? context : '',
     AttachmentsJSON: JSON.stringify(attachments), Status: 'Pending',
     CreatedAt: new Date((message.date || Math.floor(Date.now() / 1000)) * 1000).toISOString(),
