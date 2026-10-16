@@ -13,6 +13,6 @@
     "start:local": "node --env-file=.env src/index.js",
     "frontend": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
-    "check": "node --check src/index.js && node --check src/ai.js && node --check src/schema.js && node --check src/sheets.js && node --check src/telegram.js && node --check src/project-service.js && node --check src/seed-workflow.js && node --check src/residential-interior.js && node --check src/workflow-engine.js && node src/check-workflow-engine.js"
+    "check": "node --check src/index.js && node --check src/ai.js && node --check src/schema.js && node --check src/sheets.js && node --check src/telegram.js && node --check src/project-service.js && node --check src/seed-workflow.js && node --check src/residential-interior.js && node --check src/interior-sheet-plan.js && node --check src/workflow-engine.js && node src/check-workflow-engine.js"
   }
 }

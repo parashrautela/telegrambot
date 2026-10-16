@@ -82,14 +82,15 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
   let scheduledTargetEnd = targetEndDate;
   if (scheduled) {
     scheduledTargetEnd = scheduled.targetEndDate;
-    for (const task of scheduled.tasks) {
-      await store.append('Tasks', {
-        ...task,
-        ProjectID: project.ProjectID,
-        LastUpdatedAt: new Date().toISOString(),
-        LastUpdatedBy: String(actorTelegramId || 'System'),
-      });
-    }
+    const rows = scheduled.tasks.map((task) => ({
+      ...task,
+      ProjectID: project.ProjectID,
+      LastUpdatedAt: new Date().toISOString(),
+      LastUpdatedBy: String(actorTelegramId || 'System'),
+    }));
+    // A graph plan can have dozens of tasks (INTERIOR-SHEET-V1 has 68). One batched append stays inside the Sheets write quota.
+    if (store.appendRows) await store.appendRows('Tasks', rows);
+    else for (const row of rows) await store.append('Tasks', row);
   } else {
     let cursor = startDate;
     for (const template of workflow) {

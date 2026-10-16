@@ -225,7 +225,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
             if (!stage) { stage = {name:row.Stage,durationDays:0,tasks:[]}; stages.push(stage); }
             stage.durationDays += Number(row.DurationDays) || 0; stage.tasks.push(row.TaskName);
           }
-          return {id:option.id,name:option.label,description:option.description,stages,parallel:option.id==='RESIDENTIAL-INTERIOR-V1'};
+          return {id:option.id,name:option.label,description:option.description,stages,parallel:Boolean(option.parallel)};
         }).filter((workflow)=>workflow.stages.length);
         return respond(res,200,{workflows});
       }

@@ -1,4 +1,5 @@
 import { residentialInteriorTuples } from './residential-interior.js';
+import { interiorSheetTuples } from './interior-sheet-plan.js';
 
 export const SHEETS = {
   DecisionRequests: [
@@ -129,6 +130,7 @@ export const WORKFLOWS = {
   'PAINTING-V1': PAINTING_WORKFLOW,
   'INTERIOR-V1': INTERIOR_WORKFLOW,
   'RESIDENTIAL-INTERIOR-V1': residentialInteriorTuples(),
+  'INTERIOR-SHEET-V1': interiorSheetTuples(),
 };
 
 export function templateRecord(step) {
@@ -147,5 +149,6 @@ export const WORKFLOW_OPTIONS = [
   { id: 'RESTORATION-V1', label: 'Restoration', description: 'Repair and restore an existing property' },
   { id: 'PAINTING-V1', label: 'Painting & finishes', description: 'Painting-led refresh workflow' },
   { id: 'INTERIOR-V1', label: 'Interior renovation', description: 'Interior design and execution workflow' },
-  { id: 'RESIDENTIAL-INTERIOR-V1', label: 'Residential interior (parallel)', description: 'Design first, then overlapping trades with approval and material gates' },
+  { id: 'RESIDENTIAL-INTERIOR-V1', label: 'Residential interior (parallel)', description: 'Design first, then overlapping trades with approval and material gates', parallel: true },
+  { id: 'INTERIOR-SHEET-V1', label: 'Interior (founders’ sheet plan)', description: 'The full INTERIOR 1 plan from the Google Sheet: design, every trade, parallel drawings and selections', parallel: true },
 ];

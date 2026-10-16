@@ -116,8 +116,10 @@ test('seeding fills blank template durations without overwriting founder edits',
     { rowNumber: 2, WorkflowID: 'RESIDENTIAL-INTERIOR-V1', Sequence: '5', DurationDays: '' },
     { rowNumber: 3, WorkflowID: 'RESIDENTIAL-INTERIOR-V1', Sequence: '410', DurationDays: '25' },
     ...['HOUSE-V1', 'RESTORATION-V1', 'PAINTING-V1', 'INTERIOR-V1'].map((WorkflowID, index) => ({ rowNumber: 10 + index, WorkflowID, Sequence: '5', DurationDays: '1' })),
+    { rowNumber: 20, WorkflowID: 'INTERIOR-SHEET-V1', Sequence: '10', DurationDays: '1' },
   ];
   store.append = async () => { throw new Error('should not append'); };
+  store.appendRows = async () => { throw new Error('should not append'); };
   store.updateRow = async () => {};
   store.updateRows = async (sheet, changes) => writes.push(...changes);
   await store.seedDefaultWorkflows();
@@ -161,4 +163,134 @@ test('completed work cannot be moved and started successors are warned about, no
   assert.equal(result.ok, true);
   assert.equal(result.warnings[0].taskId, 'B');
   assert.equal(result.affected.find((item) => item.taskId === 'C'), undefined);
+});
+
+const interiorSchedule = async () => {
+  const { interiorSheetDefinitions } = await import('./interior-sheet-plan.js');
+  const definitions = interiorSheetDefinitions();
+  const result = scheduleDefinitions(definitions, { startDate: '2026-11-02' });
+  const named = (name) => result.tasks.find((item) => item.taskName === name);
+  return { definitions, result, named };
+};
+
+test('the founders INTERIOR 1 sheet plan becomes a 68-task graph template', async () => {
+  const { definitions } = await interiorSchedule();
+  assert.equal(definitions.length, 68);
+  const sequences = definitions.map((item) => Number(item.sequence));
+  assert.equal(new Set(sequences).size, 68);
+  assert.deepEqual(sequences, [...sequences].sort((a, b) => a - b));
+  assert.equal(new Set(definitions.map((item) => item.taskName)).size, 68);
+  assert.ok(definitions.every((item) => item.workflowId === 'INTERIOR-SHEET-V1' && item.templateVersion === 'INTERIOR-SHEET-V1' && item.defaultRole));
+  assert.equal(definitions.find((item) => item.taskName === 'Flooring — Presentation').defaultRole, 'Site Team');
+  assert.ok(definitions.some((item) => item.taskName === 'Civil Work — Site Condition Check'));
+  assert.deepEqual([...new Set(definitions.filter((item) => item.phase === 'Design').map((item) => item.stage))], ['Design plan', 'Design concept', '3D Design']);
+  assert.ok(new Set(definitions.map((item) => item.stage)).has('Plumbing Work (6a)'));
+  const { WORKFLOWS, WORKFLOW_OPTIONS } = await import('./schema.js');
+  assert.equal(WORKFLOWS['INTERIOR-SHEET-V1'].length, 68);
+  assert.ok(WORKFLOW_OPTIONS.some((option) => option.id === 'INTERIOR-SHEET-V1'));
+});
+
+test('the INTERIOR 1 plan is dated except the flooring presentation with no sheet duration', async () => {
+  const { result, named } = await interiorSchedule();
+  const undated = result.tasks.filter((item) => !item.forecastStart).map((item) => item.taskName);
+  assert.deepEqual(undated, ['Flooring — Presentation', 'Flooring — Selection and site delivery']);
+  assert.equal(named('Flooring — Presentation').unscheduledReason, 'Duration unconfirmed');
+  assert.equal(result.targetEndDate, '');
+  assert.equal(result.tasks.map((item) => item.forecastEnd).filter(Boolean).sort().at(-1), '2027-04-03');
+  assert.deepEqual([named('Existing resources').forecastStart, named('Final Check — Approval').forecastEnd], ['2026-11-02', '2027-04-03']);
+});
+
+test('the INTERIOR 1 main lane runs stage after stage and task after task', async () => {
+  const { definitions, result } = await interiorSchedule();
+  const parallelStages = new Set(['Electrical Work', 'Plumbing Work (6a)', 'Flooring (7a)', 'Ceiling_1', 'Carpentering_Wall (9a)', 'Wall POP', 'Carpentering_Furniture (11a)', 'Corian, Profile Works, Fabrics & Misc (12a)', 'Painting (13a)']);
+  const main = result.tasks.filter((item) => !parallelStages.has(item.stage));
+  assert.equal(main.length, 47);
+  assert.deepEqual(definitions[0].predecessors, []);
+  main.forEach((item, index) => {
+    if (index === 0) return;
+    const previous = main[index - 1];
+    assert.deepEqual(item.predecessors, [{ sequence: previous.sequence, type: 'FS' }], item.taskName);
+    const dayAfter = new Date(Date.parse(`${previous.forecastEnd}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
+    assert.equal(item.forecastStart, dayAfter, item.taskName);
+  });
+});
+
+test('INTERIOR 1 parallel stages start with their anchor row task', async () => {
+  const { result, named } = await interiorSchedule();
+  const anchors = [
+    ['Electrical Work — Drawing', 'Civil Work — Client Presentation & approval'],
+    ['Plumbing Work — Drawing', 'Electrical Work 1 — Drawing approval'],
+    ['Flooring — Presentation', 'Plumbing Work — Client Presentation & approval'],
+    ['Ceiling_1 — Drawing', 'Flooring — Site Condition Check'],
+    ['Carpentering_Wall — Presentation', 'Flooring — Drawing approval'],
+    ['Wall POP — Drawing', 'Carpentering_Wall — Site Condition Check'],
+    ['Drawings & Presentation', 'Carpentering_Wall — Drawing approval'],
+    ['Site Check', 'Carpentering_Furniture — Site Condition Check'],
+    ['Painting — Presentation', 'Corian, Profile Works, Fabrics & Misc — Site Execution'],
+  ];
+  for (const [first, anchor] of anchors) {
+    assert.deepEqual(named(first).predecessors, [{ sequence: named(anchor).sequence, type: 'SS' }], first);
+    if (named(first).forecastStart) assert.equal(named(first).forecastStart, named(anchor).forecastStart, first);
+  }
+  assert.equal(result.tasks.filter((item) => item.predecessors.some((edge) => edge.type === 'SS')).length, anchors.length);
+});
+
+test('INTERIOR 1 items sharing an order number run side by side', async () => {
+  const { named } = await interiorSchedule();
+  const drawings = named('Drawings & Presentation');
+  const approval = named('Carpentering_Furniture — Approval');
+  const selection = named('Carpentering_Furniture — Selection and site delivery');
+  for (const item of [approval, selection]) {
+    assert.deepEqual(item.predecessors, [{ sequence: drawings.sequence, type: 'FS' }]);
+    assert.equal(item.forecastStart, '2027-02-04');
+  }
+  assert.deepEqual([approval.forecastEnd, selection.forecastEnd], ['2027-02-09', '2027-02-18']);
+});
+
+test('order groups wait for every item of the previous group, across stages too', async () => {
+  const { sheetPlanDefinitions } = await import('./interior-sheet-plan.js');
+  const definitions = sheetPlanDefinitions([
+    { code: '1', name: 'Design plan', lane: 'main', tasks: [[1, '1', 'Brief', 1, 'Designer'], [2, '2', 'Plan A', 2, null], [3, '2', 'Plan B', 4, 'Designer']] },
+    { code: '2', name: 'Civil', lane: 'main', tasks: [[4, '1', 'Check', 1, 'Site Supervisor'], [5, '2', 'Build', 3, 'Mason']] },
+    { code: '2a', name: 'Civil drawings', lane: 'parallel', anchor: { stageCode: '2', row: 5 }, tasks: [[5, '1', 'Draw', 2, 'Designer'], [6, '2', 'Approve', 1, 'Design Head']] },
+  ]);
+  const bySequence = (sequence) => definitions.find((item) => item.sequence === sequence);
+  assert.deepEqual(bySequence('20').predecessors, [{ sequence: '10', type: 'FS' }]);
+  assert.deepEqual(bySequence('30').predecessors, [{ sequence: '10', type: 'FS' }]);
+  assert.deepEqual(bySequence('40').predecessors, [{ sequence: '20', type: 'FS' }, { sequence: '30', type: 'FS' }]);
+  assert.deepEqual(bySequence('60').predecessors, [{ sequence: '50', type: 'SS' }]);
+  assert.equal(bySequence('20').defaultRole, 'Site Team');
+  const result = scheduleDefinitions(definitions, { startDate: '2026-11-02' });
+  const dates = Object.fromEntries(result.tasks.map((item) => [item.taskName, [item.forecastStart, item.forecastEnd]]));
+  assert.deepEqual(dates['Plan A'], ['2026-11-03', '2026-11-04']);
+  assert.deepEqual(dates['Plan B'], ['2026-11-03', '2026-11-06']);
+  assert.deepEqual(dates.Check, ['2026-11-07', '2026-11-07']);
+  assert.deepEqual(dates.Draw, ['2026-11-08', '2026-11-09']);
+  assert.equal(result.targetEndDate, '2026-11-10');
+});
+
+test('seeding a sheet without the INTERIOR 1 plan writes it in one batched append', async () => {
+  const store = Object.create(SheetStore.prototype);
+  const batches = [];
+  store.rows = async () => ['HOUSE-V1', 'RESTORATION-V1', 'PAINTING-V1', 'INTERIOR-V1', 'RESIDENTIAL-INTERIOR-V1'].map((WorkflowID, index) => ({ rowNumber: 2 + index, WorkflowID, Sequence: '5', DurationDays: '1' }));
+  store.append = async () => { throw new Error('should not append row by row'); };
+  store.updateRow = async () => {};
+  store.updateRows = async () => {};
+  store.appendRows = async (sheet, objects) => batches.push({ sheet, objects });
+  await store.seedDefaultWorkflows();
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].sheet, 'WorkflowTemplates');
+  assert.equal(batches[0].objects.length, 68);
+  assert.deepEqual([batches[0].objects[1].TaskName, batches[0].objects[1].DependencySequences, batches[0].objects[1].TemplateVersion], ['2D drawing', '10:FS', 'INTERIOR-SHEET-V1']);
+});
+
+test('appendRows sends every row in a single values:append request', async () => {
+  const store = Object.create(SheetStore.prototype);
+  const calls = [];
+  store.request = async (path, options) => calls.push({ path, body: JSON.parse(options.body) });
+  await store.appendRows('Users', [{ TelegramUserID: '1', Name: 'A' }, { TelegramUserID: '2', Name: 'B', Active: 'Yes' }], { raw: true });
+  await store.appendRows('Users', []);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /:append\?valueInputOption=RAW&insertDataOption=INSERT_ROWS$/);
+  assert.deepEqual(calls[0].body.values, [['1', 'A', '', ''], ['2', 'B', '', 'Yes']]);
 });

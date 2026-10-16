@@ -92,7 +92,8 @@ export class SheetStore {
     const known = new Set(existing.map((row) => row.WorkflowID));
     for (const [workflowId, steps] of Object.entries(WORKFLOWS)) {
       if (!known.has(workflowId)) {
-        for (const step of steps) await this.append('WorkflowTemplates', templateRecord(step));
+        // One call per workflow. Row-by-row appends of a 68-step plan exceed the Sheets write quota.
+        await this.appendRows('WorkflowTemplates', steps.map(templateRecord));
         continue;
       }
       if (steps.some((step) => step[9])) {
@@ -133,6 +134,16 @@ export class SheetStore {
     const values = headers.map((header) => object[header] ?? '');
     await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=${raw ? 'RAW' : 'USER_ENTERED'}&insertDataOption=INSERT_ROWS`, {
       method: 'POST', body: JSON.stringify({ values: [values] }),
+    });
+  }
+
+  // Many new rows in one values:append call, in the given order.
+  async appendRows(sheetName, objects, { raw = false } = {}) {
+    if (!objects.length) return;
+    const headers = SHEETS[sheetName];
+    const values = objects.map((object) => headers.map((header) => object[header] ?? ''));
+    await this.request(`/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=${raw ? 'RAW' : 'USER_ENTERED'}&insertDataOption=INSERT_ROWS`, {
+      method: 'POST', body: JSON.stringify({ values }),
     });
   }
 
