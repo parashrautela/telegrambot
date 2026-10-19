@@ -74,6 +74,21 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         const input = await readBody(req);
         if (!['Completed', 'Abandoned'].includes(input.outcome)) return respond(res, 400, { error: 'Choose Completed or Abandoned.' });
         const project = await store.projectForGroup(String(input.groupChatId || ''));
+        if (!project && input.allowUnstarted === true) {
+          const groupId = String(input.groupChatId || '');
+          const registered = (await store.rows('GroupRegistry')).some((group) => String(group.GroupChatID) === groupId);
+          if (!registered) return respond(res, 404, { error: 'The Telegram group is not registered with this bot.' });
+          if (typeof input.projectName !== 'string' || !input.projectName.trim() || input.projectName.length > 120) return respond(res, 400, { error: 'Enter a project name.' });
+          const key = 'closing-group:' + groupId;
+          if (startingProjects.has(key)) return respond(res, 409, { error: 'This project is being closed. Please wait.' });
+          startingProjects.add(key);
+          try {
+            let announcementStatus = 'Sent';
+            try { await sendMessage(token, groupId, `<b>${escape(input.projectName.trim())}</b>\n\nThis project is now ${input.outcome.toLowerCase()}. The project history is retained.`); }
+            catch { announcementStatus = 'Unknown'; }
+            return respond(res, 200, { status: input.outcome, announcementStatus });
+          } finally { startingProjects.delete(key); }
+        }
         if (!project || project.WebManaged !== 'Yes') return respond(res, 404, { error: 'Linked web-managed project not found.' });
         const key = 'tasks:' + project.ProjectID;
         if (startingProjects.has(key)) return respond(res, 409, { error: 'A project change is being saved. Try again shortly.' });
