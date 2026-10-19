@@ -70,6 +70,27 @@ export function startWebBridge({ store, token, founderTelegramId }) {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
       if (!equal((req.headers.authorization || '').replace(/^Bearer /i, ''), secret)) return respond(res, 401, { error: 'Integration authentication required.' });
+      if (req.method === 'POST' && req.url === '/api/integrations/web/projects/close') {
+        const input = await readBody(req);
+        if (!['Completed', 'Abandoned'].includes(input.outcome)) return respond(res, 400, { error: 'Choose Completed or Abandoned.' });
+        const project = await store.projectForGroup(String(input.groupChatId || ''));
+        if (!project || project.WebManaged !== 'Yes') return respond(res, 404, { error: 'Linked web-managed project not found.' });
+        const key = 'tasks:' + project.ProjectID;
+        if (startingProjects.has(key)) return respond(res, 409, { error: 'A project change is being saved. Try again shortly.' });
+        if (['Completed', 'Abandoned'].includes(project.Status)) {
+          if (project.Status !== input.outcome) return respond(res, 409, { error: `This project is already ${project.Status.toLowerCase()}.` });
+          return respond(res, 200, { status: project.Status, announcementStatus: 'Unknown', alreadyClosed: true });
+        }
+        startingProjects.add(key);
+        try {
+          await store.closeProject({ project, outcome: input.outcome, actorTelegramId: founderTelegramId, actorName: 'Founder', source: 'Web app' });
+          let announcementStatus = 'Sent';
+          try {
+            await sendMessage(token, project.GroupChatID, `<b>${escape(project.ProjectName)}</b>\n\nThis project is now ${input.outcome.toLowerCase()}. The project history is retained.`);
+          } catch { announcementStatus = 'Unknown'; }
+          return respond(res, 200, { status: input.outcome, announcementStatus });
+        } finally { startingProjects.delete(key); }
+      }
       if(req.method==='POST' && req.url==='/api/integrations/web/tasks/sync') {
         const input=await readBody(req);const project=await store.projectForGroup(String(input.groupChatId || ''));
         if(!project || project.WebManaged!=='Yes')return respond(res,404,{error:'Web-managed project not found.'});
@@ -78,6 +99,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         startingProjects.add(syncKey);
         try {
         if(!Array.isArray(input.updates) || input.updates.length>200)return respond(res,400,{error:'Invalid task updates.'});
+        if (input.updates.length && ['Completed', 'Abandoned'].includes(project.Status)) return respond(res,409,{error:'This project is closed.'});
         const all=await store.rows('Tasks');
         const tasks=all.filter(task=>task.ProjectID===project.ProjectID);
         const updates=[];const seen=new Set();

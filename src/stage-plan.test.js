@@ -8,6 +8,21 @@ const six = (days = [1, 2, 1, 1, 5, 2]) => STAGE_TASKS.map((task, index) => ({ k
 const options = { projectId: 'P001', today: '2026-10-16' };
 const withRowNumbers = (rows, offset = 2) => rows.map((row, index) => ({ ...row, rowNumber: offset + index }));
 
+test('custom stages preserve arbitrary task names, roles and order beyond the studio template', () => {
+  const tasks = Array.from({ length: 8 }, (_, i) => ({ key: `custom-${i}`, title: `Permit step ${i + 1}`, durationDays: 2, role: 'Architect' }));
+  const { rows } = buildStageTasks([], { custom: true, name: 'Permits', placement: { type: 'date', startDate: '2026-11-01' }, tasks }, options);
+  assert.equal(rows.length, 8);
+  assert.equal(rows[0].TaskName, 'Permits — Permit step 1');
+  assert.equal(rows[7].AssignedRole, 'Architect');
+  assert.equal(rows[7].ForecastEnd, '2026-11-16');
+  assert.equal(rows[7].PredecessorTaskIDs, 'P001-ST1-7:FS');
+  const build = (tasks) => buildStageTasks([], { custom: true, name: 'Permits', tasks }, options);
+  assert.throws(() => build([{ ...tasks[0], title: '' }]), /task title/);
+  assert.throws(() => build([{ ...tasks[0], durationDays: 0 }]), /at least one/);
+  assert.throws(() => build([tasks[0], tasks[0]]), /once/);
+  assert.throws(() => build(Array.from({ length: 61 }, (_, i) => ({ ...tasks[0], key: `task-${i}` }))), /60/);
+});
+
 test('a new stage is six tasks in a row with no overlap', () => {
   const { rows, stage } = buildStageTasks([], { name: 'Civil', placement: { type: 'date', startDate: '2026-11-02' }, tasks: six() }, options);
   assert.equal(rows.length, 6);

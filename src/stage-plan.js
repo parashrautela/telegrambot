@@ -137,14 +137,23 @@ export function buildStageTasks(existingRows, spec, { projectId, groupMembers = 
   if (clash) throw new PlanError(`A stage called "${clash.name}" already exists. Try "${clash.name} (2)".`, 409);
 
   const input = Array.isArray(spec.tasks) ? spec.tasks : [];
-  if (input.length > STAGE_TASKS.length) throw new PlanError('A stage has at most six tasks.');
+  const custom = spec.custom === true;
+  if (input.length > (custom ? 60 : STAGE_TASKS.length)) throw new PlanError(custom ? 'A custom stage has at most 60 tasks.' : 'A stage has at most six tasks.');
   const byKey = new Map();
   for (const task of input) {
-    if (!task || !STAGE_TASKS.some((item) => item.key === task.key)) throw new PlanError('Unknown stage task.');
+    if (!task || (!custom && !STAGE_TASKS.some((item) => item.key === task.key))) throw new PlanError('Unknown stage task.');
+    if (custom && (typeof task.key !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(task.key))) throw new PlanError('Invalid custom task key.');
     if (byKey.has(task.key)) throw new PlanError('Each stage task can appear once.');
     byKey.set(task.key, task);
   }
-  const chosen = STAGE_TASKS.map((template, index) => {
+  const templates = custom ? input.map((task) => {
+    const title = typeof task.title === 'string' ? task.title.trim() : '';
+    if (!title || title.length > 80 || title.includes('—')) throw new PlanError('Enter a task title of 1 to 80 characters without "—".');
+    if (typeof task.role !== 'string' || !task.role.trim() || task.role.trim().length > 80) throw new PlanError('Enter a task role of 1 to 80 characters.');
+    if (!validDuration(task.durationDays)) throw new PlanError('Custom tasks need at least one day.');
+    return { key: task.key, title, role: task.role.trim(), roleEditable: true };
+  }) : STAGE_TASKS;
+  const chosen = templates.map((template, index) => {
     const task = byKey.get(template.key) || {};
     const role = template.roleEditable && typeof task.role === 'string' && task.role.trim() ? task.role.trim().slice(0, 80) : template.role;
     return { template, index, task, role, durationDays: validDuration(task.durationDays) };
