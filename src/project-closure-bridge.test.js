@@ -17,7 +17,7 @@ test('web closure announces the chosen outcome once and requires integration aut
     sent.push(JSON.parse(options.body));
     return Response.json({ ok: true, result: { message_id: sent.length } });
   };
-  const store = { projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id), closeProject: async ({ project, outcome }) => { project.Status = outcome; } };
+  const store = { rows: async () => [{ GroupChatID: '-555' }], projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id), closeProject: async ({ project, outcome }) => { project.Status = outcome; } };
   const server = startWebBridge({ store, token: 'test-token', founderTelegramId: '7' });
   t.after(async () => {
     await new Promise((resolve) => server.close(resolve));
@@ -38,4 +38,11 @@ test('web closure announces the chosen outcome once and requires integration aut
   assert.match(sent[0].text, /This project is now completed/);
   assert.match(sent[1].text, /This project is now abandoned/);
   assert.equal((await post({ groupChatId: '-1', outcome: 'Abandoned' })).status, 409);
+  const setup = await post({ groupChatId: '-555', allowUnstarted: true, projectName: 'Kumar Residence', outcome: 'Abandoned' });
+  assert.equal(setup.status, 200);
+  assert.equal((await setup.json()).announcementStatus, 'Sent');
+  assert.match(sent.at(-1).text, /Kumar Residence/);
+  assert.match(sent.at(-1).text, /now abandoned/);
+  assert.equal((await post({ groupChatId: '-555', outcome: 'Abandoned' })).status, 404, 'unstarted mode must be explicit');
+  assert.equal((await post({ groupChatId: '-999', allowUnstarted: true, projectName: 'Unknown', outcome: 'Abandoned' })).status, 404);
 });

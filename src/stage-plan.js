@@ -252,7 +252,7 @@ export function buildStagePlan(existingRows, specs, options) {
 
 // One extra task inside a stage, placed after another task of that stage (or first when afterTaskId is blank).
 // Returns the new row plus the predecessor rewiring, so the chain stays one after another.
-export function insertStageTask(existingRows, { stageName, afterTaskId = '', title, role, durationDays, assigneeTelegramId, assigneeName }, { projectId, groupMembers = [], lastUpdatedBy = '' } = {}) {
+export function insertStageTask(existingRows, { stageName, afterTaskId = '', placementType = 'after', startDate: explicitStart, title, role, durationDays, assigneeTelegramId, assigneeName }, { projectId, groupMembers = [], lastUpdatedBy = '' } = {}) {
   const stage = findStage(existingRows, stageName);
   if (!stage) throw new PlanError(`Stage "${stageName}" was not found.`, 404);
   const name = typeof title === 'string' ? title.trim().replace(/\s+/g, ' ') : '';
@@ -260,9 +260,12 @@ export function insertStageTask(existingRows, { stageName, afterTaskId = '', tit
   const days = validDuration(durationDays);
   if (!days) throw new PlanError('Give the task at least one day.');
   const taskRole = typeof role === 'string' && role.trim() ? role.trim().slice(0, 80) : 'Site Team';
-  const after = afterTaskId ? stage.rows.find((row) => row.TaskID === afterTaskId) : null;
+  if (!['after', 'parallel', 'date'].includes(placementType)) throw new PlanError('Choose after, parallel or a date.');
+  const after = afterTaskId ? openRows(existingRows).find((row) => row.TaskID === afterTaskId) : null;
   if (afterTaskId && !after) throw new PlanError('That task is not in this stage.', 404);
   const first = stage.rows[0];
+  if (placementType === 'parallel' && !after) throw new PlanError('Choose the task to run alongside.');
+  if (placementType === 'date' && !parseDate(explicitStart)) throw new PlanError('Choose a real start date.');
   const taskId = (() => {
     let number = 1;
     while (existingRows.some((row) => row.TaskID === `${projectId}-ADD${number}`)) number += 1;
@@ -270,15 +273,15 @@ export function insertStageTask(existingRows, { stageName, afterTaskId = '', tit
   })();
 
   // The new task takes over the old links: it waits for "after" (or for whatever the first task waited for).
-  const predecessors = after ? `${after.TaskID}:FS` : String(first.PredecessorTaskIDs || '');
-  const startDate = after ? (effectiveEnd(after) ? shiftDate(effectiveEnd(after), 1) : '') : effectiveStart(first);
+  const predecessors = placementType === 'date' ? '' : after ? `${after.TaskID}:${placementType === 'parallel' ? 'SS' : 'FS'}` : String(first.PredecessorTaskIDs || '');
+  const startDate = placementType === 'date' ? explicitStart : after ? (placementType === 'parallel' ? effectiveStart(after) : effectiveEnd(after) ? shiftDate(effectiveEnd(after), 1) : '') : effectiveStart(first);
   const endDate = startDate ? shiftDate(startDate, days - 1) : '';
   const rewire = [];
   const replaceLink = (row, fromId) => {
     const edges = dependencyEdges(row).map((edge) => (edge.id === fromId && edge.type === 'FS' ? { ...edge, id: taskId } : edge));
     return edges.map((edge) => `${edge.id}:${edge.type}`).join(',');
   };
-  if (after) {
+  if (placementType === 'after' && after && sameName(after.Stage, stage.name)) {
     const wasLast = lastTaskOf(stage.rows).TaskID === after.TaskID;
     for (const row of openRows(existingRows)) {
       if (row.TaskID === after.TaskID) continue;
@@ -287,8 +290,15 @@ export function insertStageTask(existingRows, { stageName, afterTaskId = '', tit
       // Same-stage successors always move behind the new task; other stages only when it becomes the stage's last task.
       if (sameName(row.Stage, stage.name) || wasLast) rewire.push({ row, PredecessorTaskIDs: replaceLink(row, after.TaskID) });
     }
-  } else {
+  } else if (placementType === 'after' && !after) {
     rewire.push({ row: first, PredecessorTaskIDs: `${taskId}:FS` });
+  }
+  if (placementType !== 'after') {
+    const last = lastTaskOf(stage.rows);
+    for (const target of openRows(existingRows)) {
+      const edges = dependencyEdges(target);
+      if (!sameName(target.Stage, stage.name) && edges.some((edge) => edge.id === last.TaskID && edge.type === 'FS')) rewire.push({ row: target, PredecessorTaskIDs: [...edges.map((edge) => `${edge.id}:${edge.type}`), `${taskId}:FS`].join(',') });
+    }
   }
 
   const sequences = stage.rows.map((row) => Number(row.Sequence) || 0);
@@ -320,6 +330,41 @@ export function insertStageTask(existingRows, { stageName, afterTaskId = '', tit
     LastUpdatedBy: String(lastUpdatedBy),
   });
   return { row, rewire: rewire.map(({ row: target, PredecessorTaskIDs }) => ({ taskId: target.TaskID, rowNumber: target.rowNumber, PredecessorTaskIDs, PredecessorTaskID: PredecessorTaskIDs.split(',').find((edge) => edge.endsWith(':FS'))?.split(':')[0] || '' })) };
+}
+
+export function editStageTask(rows, input, { groupMembers = [] } = {}) {
+  const current = rows.find((row) => row.TaskID === input.taskId);
+  if (!current) throw new PlanError('Task not found.', 404);
+  if (current.Status === 'Completed' || CLOSED.test(current.Status || '')) throw new PlanError('Completed work cannot be edited.', 409);
+  if (input.fromTitle !== current.TaskName || input.fromStart !== effectiveStart(current) || input.fromEnd !== effectiveEnd(current)) throw new PlanError('This work changed since you opened it. Refresh and try again.', 409);
+  if (input.fromRole !== (current.AssignedRole || 'Team')) throw new PlanError('The role changed since you opened this work. Refresh and try again.', 409);
+  const name = typeof input.title === 'string' ? input.title.trim() : '';
+  const role = typeof input.role === 'string' ? input.role.trim() : '';
+  if (!name || name.length > 80 || name.includes('—')) throw new PlanError('Enter a task name of 1 to 80 characters without —.');
+  if (!role || role.length > 80) throw new PlanError('Enter a role of 1 to 80 characters.');
+  const days = validDuration(input.durationDays);
+  if (!days) throw new PlanError('Give the task at least one day.');
+  const placement = input.placement || { type: 'keep' };
+  let start = effectiveStart(current), predecessors = current.PredecessorTaskIDs || (current.PredecessorTaskID ? `${current.PredecessorTaskID}:FS` : '');
+  if (placement.type === 'date') { start = placement.startDate; predecessors = ''; }
+  else if (['after', 'parallel'].includes(placement.type)) {
+    const anchor = openRows(rows).find((row) => row.TaskID === placement.taskId);
+    if (!anchor || anchor.TaskID === current.TaskID) throw new PlanError('Choose another task in this project.');
+    start = placement.type === 'parallel' ? effectiveStart(anchor) : effectiveEnd(anchor) ? shiftDate(effectiveEnd(anchor), 1) : '';
+    predecessors = `${anchor.TaskID}:${placement.type === 'parallel' ? 'SS' : 'FS'}`;
+  } else if (placement.type !== 'keep') throw new PlanError('Choose where the task starts.');
+  if (!parseDate(start)) throw new PlanError('Choose a confirmed start date.');
+  const assignee = assigneeFor(input, role, groupMembers);
+  const changes = { TaskName: current.Stage ? `${current.Stage} — ${name}` : name, AssignedRole: role, AssignedTelegramID: assignee.id, AssignedName: assignee.name, PredecessorTaskIDs: predecessors, PredecessorTaskID: predecessors.split(',').find((edge) => edge.endsWith(':FS'))?.split(':')[0] || '', DependencyType: predecessors && !predecessors.includes(',') ? predecessors.split(':')[1] : '' };
+  return { row: current, changes, rows: rows.map((row) => row.TaskID === current.TaskID ? { ...row, ...changes } : row), moves: [{ taskId: current.TaskID, start, end: shiftDate(start, days - 1) }] };
+}
+
+export function renameStage(rows, stageName, name) {
+  const stage = findStage(rows, stageName);
+  if (!stage) throw new PlanError('This stage changed. Refresh and try again.', 409);
+  const next = validName(name), clash = findStage(rows, next);
+  if (clash && !sameName(clash.name, stage.name)) throw new PlanError('A stage with this name already exists.', 409);
+  return stage.rows.map((row) => ({ rowNumber: row.rowNumber, changes: { Stage: next, ...(row.Trade === stage.name ? { Trade: next } : {}), ...(row.TaskName?.startsWith(stage.name + ' — ') ? { TaskName: next + ' — ' + row.TaskName.slice(stage.name.length + 3) } : {}) } }));
 }
 
 // Delay / redo / complete for one task. Returns schedule moves for rescheduleTasks and the status fields to write after them.

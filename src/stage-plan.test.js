@@ -1,12 +1,42 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { STAGE_TASKS, buildStageTasks, buildStagePlan, insertStageTask, planTaskAction, defaultPlanStages, scheduleSentence } from './stage-plan.js';
+import { STAGE_TASKS, buildStageTasks, buildStagePlan, insertStageTask, editStageTask, renameStage, planTaskAction, defaultPlanStages, scheduleSentence } from './stage-plan.js';
 import { rescheduleTasks } from './workflow-engine.js';
 
 const six = (days = [1, 2, 1, 1, 5, 2]) => STAGE_TASKS.map((task, index) => ({ key: task.key, durationDays: days[index] }));
 const options = { projectId: 'P001', today: '2026-10-16' };
 const withRowNumbers = (rows, offset = 2) => rows.map((row, index) => ({ ...row, rowNumber: offset + index }));
+
+test('parallel inserted tasks leave their peers in place and join before the following stage', () => {
+  const civil = withRowNumbers(buildStageTasks([], { name: 'Civil', placement: { type: 'date', startDate: '2026-11-02' }, tasks: six() }, options).rows);
+  const flooring = withRowNumbers(buildStageTasks(civil, { name: 'Flooring', tasks: six() }, options).rows, 8);
+  const all = [...civil, ...flooring];
+  const { row, rewire } = insertStageTask(all, { stageName: 'Civil', afterTaskId: civil[0].TaskID, placementType: 'parallel', title: 'Inspection', durationDays: 20 }, options);
+  assert.equal(row.ForecastStart, civil[0].ForecastStart);
+  assert.equal(row.PredecessorTaskIDs, civil[0].TaskID + ':SS');
+  const rewired = all.map((task) => ({ ...task, ...(rewire.find((item) => item.taskId === task.TaskID) || {}) }));
+  const result = rescheduleTasks([...rewired, row], []);
+  assert.equal(result.ok, true);
+  assert.equal(result.tasks.find((task) => task.TaskID === civil[1].TaskID).ForecastStart, civil[1].ForecastStart);
+  assert.equal(result.tasks.find((task) => task.TaskID === flooring[0].TaskID).ForecastStart, '2026-11-22');
+});
+
+test('editing names and duration previews dependent changes, and stage renaming leaves dates alone', () => {
+  const rows = withRowNumbers(buildStageTasks([], { name: 'Civil', placement: { type: 'date', startDate: '2026-11-02' }, tasks: six() }, options).rows);
+  const current = rows[0];
+  const input = { taskId: current.TaskID, fromTitle: current.TaskName, fromRole: current.AssignedRole, fromStart: current.ForecastStart, fromEnd: current.ForecastEnd, title: 'New survey', role: 'Surveyor', durationDays: 3, placement: { type: 'keep' } };
+  const edited = editStageTask(rows, input);
+  const result = rescheduleTasks(edited.rows, edited.moves);
+  assert.equal(result.ok, true);
+  assert.equal(result.tasks[1].ForecastStart, '2026-11-05');
+  assert.equal(edited.changes.TaskName, 'Civil — New survey');
+  assert.equal(rows[0].TaskName, 'Civil — Site Condition Check');
+  assert.throws(() => editStageTask(rows, { ...input, fromTitle: 'old' }), /changed/);
+  const renamed = renameStage(rows, 'Civil', 'Site preparation');
+  assert.equal(renamed[0].changes.TaskName, 'Site preparation — Site Condition Check');
+  assert.equal(renamed[0].changes.ForecastStart, undefined);
+});
 
 test('custom stages preserve arbitrary task names, roles and order beyond the studio template', () => {
   const tasks = Array.from({ length: 8 }, (_, i) => ({ key: `custom-${i}`, title: `Permit step ${i + 1}`, durationDays: 2, role: 'Architect' }));

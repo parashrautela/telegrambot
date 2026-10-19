@@ -7,7 +7,7 @@ import { getChatMember, sendMessage } from './telegram.js';
 import { downloadProjectResource } from './drive-storage.js';
 import { BLANK_WORKFLOW_ID, WORKFLOW_OPTIONS } from './schema.js';
 import { projectedFinish, rescheduleTasks, withForecastDefaults } from './workflow-engine.js';
-import { STAGE_WORKFLOW_ID, buildStagePlan, defaultPlanStages, insertStageTask, planTaskAction, scheduleSentence } from './stage-plan.js';
+import { STAGE_WORKFLOW_ID, buildStagePlan, defaultPlanStages, insertStageTask, editStageTask, renameStage, planTaskAction, scheduleSentence } from './stage-plan.js';
 
 const active = new Set(['creator', 'owner', 'administrator', 'member', 'restricted']);
 const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
@@ -74,6 +74,21 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         const input = await readBody(req);
         if (!['Completed', 'Abandoned'].includes(input.outcome)) return respond(res, 400, { error: 'Choose Completed or Abandoned.' });
         const project = await store.projectForGroup(String(input.groupChatId || ''));
+        if (!project && input.allowUnstarted === true) {
+          const groupId = String(input.groupChatId || '');
+          const registered = (await store.rows('GroupRegistry')).some((group) => String(group.GroupChatID) === groupId);
+          if (!registered) return respond(res, 404, { error: 'The Telegram group is not registered with this bot.' });
+          if (typeof input.projectName !== 'string' || !input.projectName.trim() || input.projectName.length > 120) return respond(res, 400, { error: 'Enter a project name.' });
+          const key = 'closing-group:' + groupId;
+          if (startingProjects.has(key)) return respond(res, 409, { error: 'This project is being closed. Please wait.' });
+          startingProjects.add(key);
+          try {
+            let announcementStatus = 'Sent';
+            try { await sendMessage(token, groupId, `<b>${escape(input.projectName.trim())}</b>\n\nThis project is now ${input.outcome.toLowerCase()}. The project history is retained.`); }
+            catch { announcementStatus = 'Unknown'; }
+            return respond(res, 200, { status: input.outcome, announcementStatus });
+          } finally { startingProjects.delete(key); }
+        }
         if (!project || project.WebManaged !== 'Yes') return respond(res, 404, { error: 'Linked web-managed project not found.' });
         const key = 'tasks:' + project.ProjectID;
         if (startingProjects.has(key)) return respond(res, 409, { error: 'A project change is being saved. Try again shortly.' });
@@ -142,6 +157,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         const input = await readBody(req);
         const project = await store.projectForGroup(String(input.groupChatId || ''));
         if (!project) return respond(res, 404, { error: 'Linked project not found.' });
+        if (['Completed', 'Abandoned'].includes(project.Status)) return respond(res, 409, { error: 'This project is closed.' });
         const moves = parseMoves(input.moves);
         if (!moves) return respond(res, 400, { error: 'Send 1 to 60 moves with a task ID and real YYYY-MM-DD start and end dates.' });
         const apply = req.url.endsWith('/apply');
@@ -170,7 +186,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
       }
       // Founder-built plans: add stages, add a task inside a stage, and delay/redo/complete a task.
       // Every route takes mode "preview" (nothing is written) or "apply".
-      if (req.method === 'POST' && ['/api/integrations/web/stages/add', '/api/integrations/web/stages/insert-task', '/api/integrations/web/tasks/action'].includes(req.url)) {
+      if (req.method === 'POST' && ['/api/integrations/web/stages/add', '/api/integrations/web/stages/insert-task', '/api/integrations/web/stages/rename', '/api/integrations/web/tasks/edit', '/api/integrations/web/tasks/action'].includes(req.url)) {
         const input = await readBody(req);
         const project = await store.projectForGroup(String(input.groupChatId || ''));
         if (!project) return respond(res, 404, { error: 'Linked project not found.' });
@@ -186,6 +202,26 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           const groupMembers = (await store.rows('GroupMembers')).filter((member) => String(member.GroupChatID) === String(project.GroupChatID));
           const options = { projectId: project.ProjectID, groupMembers, lastUpdatedBy: founderTelegramId, today: new Date().toISOString().slice(0, 10) };
           const stamp = new Date().toISOString();
+
+          if (req.url.endsWith('/stages/rename')) {
+            const changes = renameStage(rows, input.stageName, input.name);
+            if (apply) {
+              await store.updateRows('Tasks', changes.map((item) => ({ ...item, changes: { ...item.changes, LastUpdatedAt: stamp, LastUpdatedBy: String(founderTelegramId) } })));
+              await store.audit({ projectId: project.ProjectID, action: 'Stage renamed', oldValue: input.stageName, newValue: input.name, actor: founderTelegramId, actorName, source: 'Web timeline' });
+            }
+            return respond(res, 200, { ok: true, conflicts: [], warnings: [], affected: [], finish: projectedFinish(withForecastDefaults(rows)) });
+          }
+          if (req.url.endsWith('/tasks/edit')) {
+            const edited = editStageTask(rows, input, options);
+            const result = rescheduleTasks(edited.rows, edited.moves);
+            const summary = { ok: result.ok, conflicts: result.conflicts, warnings: result.warnings, affected: result.affected, finish: result.finish };
+            if (!apply) return respond(res, 200, summary);
+            if (!result.ok) return respond(res, 409, { ...summary, error: result.conflicts[0].reason });
+            await writeSchedule(store, project, rows, result, { actor: founderTelegramId, actorName, source: 'Web timeline' });
+            await store.updateRows('Tasks', [{ rowNumber: edited.row.rowNumber, changes: { ...edited.changes, LastUpdatedAt: stamp, LastUpdatedBy: String(founderTelegramId) } }]);
+            await store.audit({ projectId: project.ProjectID, taskId: edited.row.TaskID, action: 'Work item edited', oldValue: edited.row.TaskName, newValue: edited.changes.TaskName, actor: founderTelegramId, actorName, source: 'Web timeline' });
+            return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
+          }
 
           if (req.url.endsWith('/stages/add')) {
             const specs = Array.isArray(input.stages) ? input.stages : [input.stage];
