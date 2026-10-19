@@ -140,6 +140,21 @@ test('web timeline moves are previewed, applied to the sheet, and protected agai
     assert.deepEqual([tasks[0].ForecastEnd, tasks[0].PlannedEnd, tasks[1].ForecastStart], ['2026-03-06', '2026-03-03', '2026-03-07'], 'deadline edit reschedules and keeps baseline');
     assert.equal((await post('/api/integrations/web/tasks/sync', { groupChatId: '-456', updates: [{ taskId: 'P001-T1', title: 'Drawings', stage: 'Design', status: 'Pending', deadline: '', assigneeTelegramId: '', assigneeName: '' }] })).status, 200);
     assert.equal(tasks[0].ForecastEnd, '2026-03-06', 'blank deadline never wipes dates');
+    const edit = { groupChatId: '-456', taskId: 'P001-T1', fromTitle: 'Drawings', fromRole: 'Team', fromStart: '2026-03-02', fromEnd: '2026-03-06', title: 'Custom drawings', role: 'Team', durationDays: 6, placement: { type: 'keep' }, mode: 'preview' };
+    const editPreview = await post('/api/integrations/web/tasks/edit', edit);
+    assert.equal(editPreview.status, 200);
+    assert.equal(editPreview.body.ok, true);
+    assert.equal(tasks[0].TaskName, 'Drawings', 'edit preview writes nothing');
+    assert.equal((await post('/api/integrations/web/tasks/edit', { ...edit, mode: 'apply' })).status, 200);
+    assert.equal(tasks[0].TaskName, 'Design — Custom drawings');
+    assert.equal(tasks[0].ForecastEnd, '2026-03-07');
+    assert.equal((await post('/api/integrations/web/tasks/edit', { ...edit, mode: 'apply' })).status, 409);
+    const rename = { groupChatId: '-456', stageName: 'Design', name: 'Planning', mode: 'preview' };
+    assert.equal((await post('/api/integrations/web/stages/rename', rename)).status, 200);
+    assert.equal(tasks[0].Stage, 'Design');
+    assert.equal((await post('/api/integrations/web/stages/rename', { ...rename, mode: 'apply' })).status, 200);
+    assert.equal(tasks[0].TaskName, 'Planning — Custom drawings');
+    assert.equal(tasks[0].ForecastEnd, '2026-03-07', 'rename preserves dates');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     if (prior.secret === undefined) delete process.env.INTEGRATION_SHARED_SECRET; else process.env.INTEGRATION_SHARED_SECRET = prior.secret;
