@@ -270,7 +270,7 @@ export class SheetStore {
     return {record,created:true};
   }
 
-  async closeProject({ project, outcome, actorTelegramId, actorName }) {
+  async closeProject({ project, outcome, actorTelegramId, actorName, source = 'Telegram founder bot' }) {
     const closedAt = now();
     const isCompleted = outcome === 'Completed';
     const taskStatus = isCompleted ? 'Closed — Project completed' : 'Cancelled — Project abandoned';
@@ -300,7 +300,7 @@ export class SheetStore {
     }
     await this.updateRow('Projects', project.rowNumber, {
       Status: outcome,
-      Notes: `${outcome} by founder after leaving the project group on ${closedAt}. Historical data retained.`,
+      Notes: `${outcome} by founder via ${source} on ${closedAt}. Historical data retained.`,
     });
     await this.audit({
       projectId: project.ProjectID,
@@ -309,7 +309,7 @@ export class SheetStore {
       newValue: outcome,
       actor: actorTelegramId,
       actorName,
-      source: 'Telegram founder bot',
+      source,
       details: `${tasks.filter((task) => !activeTaskStatuses.has(task.Status)).length} open task(s) moved to ${taskStatus}; ${members.length} project member record(s) deactivated; data retained.`,
     });
     return { closedTasks: tasks.filter((task) => !activeTaskStatuses.has(task.Status)).length, deactivatedMembers: members.length };
