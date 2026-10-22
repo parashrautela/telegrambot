@@ -1,3 +1,6 @@
+import { decideApprovalOnce } from './approval-decisions.js';
+import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
+import { recordMessageMembers, refreshGroupMembers } from './group-discovery.js';
 import {migrateTelegramGroup} from './group-migration.js';
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
@@ -33,8 +36,7 @@ async function observeGroup(chat) {
   await store.registerGroup(chat.id, chat.title || 'Unnamed Telegram group');
   observedGroups.add(String(chat.id));
   try {
-    const admins = await getChatAdministrators(config.groupToken, chat.id);
-    for (const admin of admins) await store.upsertGroupMember(chat.id, admin.user, 'Active');
+    await refreshGroupMembers({store,token:config.groupToken,groupChatId:String(chat.id)});
   } catch (error) { console.warn('Could not read group administrators:', error.message); }
   await syncGroupRoster().catch((error) => console.warn(error.message));
 }
@@ -53,7 +55,8 @@ async function syncGroupRoster() {
 async function recordGroupMember(chat, member, status) {
   if (!groupOnly(chat) || !member || member.is_bot) return;
   await observeGroup(chat);
-  await store.upsertGroupMember(chat.id, member, status);
+  const changed = await store.upsertGroupMember(chat.id, member, status);
+  if (changed === false) return;
   await syncGroupRoster().catch((error) => console.warn(error.message));
 }
 
@@ -86,8 +89,7 @@ async function discoverGroup(update) {
       await store.registerGroup(message.chat.id, message.new_chat_title);
       await syncGroupRoster().catch((error) => console.warn(error.message));
     }
-    for (const member of message.new_chat_members || []) await recordGroupMember(message.chat, member, 'Active');
-    if (message.left_chat_member) await recordGroupMember(message.chat, message.left_chat_member, 'Left');
+    await recordMessageMembers(message, recordGroupMember);
   }
 }
 
@@ -310,7 +312,7 @@ async function welcomeNewProjectMember(update) {
   await store.createOnboarding({ onboardingId, projectId: project.ProjectID, groupChatId: change.chat.id, telegramId: member.id, telegramName: memberName });
   await store.audit({ projectId: project.ProjectID, action: 'Member joined — pending profile', actor: member.id, actorName: memberName, source: 'Telegram group bot', details: onboardingId });
   const profileLink = `https://t.me/${leaderBotProfile.username}?start=profile_${onboardingId}`;
-  await sendMessage(config.groupToken, change.chat.id, `Welcome <b>${escape(memberName)}</b> 👋\n\nI’m setting up your project profile. Meanwhile, here is where the project stands:\n\n${await projectTldr(project)}\n\nThe founder will confirm your role shortly.`, process.env.WEB_APP_URL ? undefined : { inline_keyboard: [[{ text: 'Set up my profile', url: profileLink }]] });
+  await sendMessage(config.groupToken, change.chat.id, `Welcome <b>${escape(memberName)}</b>. Your role will be assigned shortly.`);
   if (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET) return;
   return sendMessage(config.leaderToken, config.founderTelegramId, `<b>New project member joined</b>\n\nName: ${escape(memberName)}\nProject: ${escape(project.ProjectName)}\nJoined: ${new Date(change.date * 1000).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}\n\nPlease assign their profile and role before they can update project tasks.`, { inline_keyboard: [[{ text: 'Assign role', callback_data: `onboard_role:${onboardingId}` }]] });
 }
@@ -412,8 +414,10 @@ async function verifyAssigned(task, from, token, chatId) {
     await sendMessage(token, chatId, 'You are not registered as an active project user yet. Ask the founder to add your Telegram ID to the Users sheet.');
     return false;
   }
-  if (task.AssignedTelegramID && String(task.AssignedTelegramID) !== String(from.id) && String(from.id) !== config.founderTelegramId) {
-    await sendMessage(token, chatId, `Only the assigned team member or the founder can update <code>${task.TaskID}</code>.`);
+  const projectFounder = groupMember?.MembershipStatus === 'Active' && hasRole(groupMember.AssignedRole, 'Founder');
+  const owns = task.AssignedTelegramID ? String(task.AssignedTelegramID) === String(from.id) : groupMember?.MembershipStatus === 'Active' && matchesRole(groupMember.AssignedRole, task.AssignedRole);
+  if (!owns && !projectFounder && String(from.id) !== config.founderTelegramId) {
+    await sendMessage(token, chatId, 'Only the assignee, responsible role or project founder can update this task.');
     return false;
   }
   return true;
@@ -424,7 +428,7 @@ async function submitDelay({ project, task, user, days, reason, groupChatId }) {
   if (task.Status === 'Delay Requested') return sendMessage(config.groupToken, groupChatId, `A delay for <b>${escape(task.TaskName)}</b> is already waiting for approval.`);
   const approvalId = await store.requestDelay({ project, task, actor: user, days, reason });
   const approverTelegramId = project.LeaderTelegramID || config.founderTelegramId;
-  await sendMessage(config.groupToken, groupChatId, `⏳ Delay request sent for approval: <b>${escape(task.TaskName)}</b> — ${days} day(s).`);
+  await sendMessage(config.groupToken, groupChatId, `⏳ <b>${escape(task.TaskName)}</b> — ${days} day(s) delay requested. A project founder can decide.`,{inline_keyboard:[[{text:'Approve',callback_data:`approve:${approvalId}`},{text:'Reject',callback_data:`reject:${approvalId}`}]]});
   return sendMessage(config.leaderToken, approverTelegramId, `<b>Delay approval needed</b>\n\nProject: ${escape(project.ProjectName)}\nTask: ${escape(task.TaskName)}\nRequested by: ${escape(user.name)}\nDelay: ${days} day(s)\nReason: ${escape(reason)}`, {
     inline_keyboard: [[
       { text: 'Approve', callback_data: `approve:${approvalId}` },
@@ -485,6 +489,15 @@ async function groupCommand(message) {
   const text = message.text?.trim() ?? '';
   const [rawCommand, ...argumentsList] = text.split(/\s+/);
   const command = rawCommand?.split('@')[0];
+  if(message.chat.type==='private' && command==='/start') {
+    const base=process.env.WEB_APP_URL?.replace(/\/$/,'');
+    if(!base || !process.env.INTEGRATION_SHARED_SECRET)return sendMessage(config.groupToken,message.chat.id,'Personal task digests are not configured yet.');
+    try {
+      const response=await fetch(`${base}/api/integrations/telegram/connect`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${process.env.INTEGRATION_SHARED_SECRET}`},body:JSON.stringify({telegramUserId:String(message.from.id)}),signal:AbortSignal.timeout(10000)});
+      const result=await response.json();
+      return sendMessage(config.groupToken,message.chat.id,response.ok?'Connected. Your morning task list will arrive here.':escape(result.error || 'Ask the founder to assign your profile first.'));
+    }catch{return sendMessage(config.groupToken,message.chat.id,'Could not connect just now. Please try /start again.');}
+  }
   if (groupOnly(message.chat) && (command === '/start' || command === '/join')) {
     await recordGroupMember(message.chat, message.from, 'Active');
     if (command === '/join') return sendMessage(config.groupToken, message.chat.id, `Registered <b>${escape(actor(message.from).name)}</b> in this group. The founder can now assign a project name and role in the web app.`);
@@ -729,6 +742,7 @@ async function leaderCommand(message) {
 }
 
 async function groupCallback(callback) {
+  if(/^(approve|reject):/.test(callback.data || ''))return leaderCallback(callback,config.groupToken);
   if (!callback.data.startsWith('ai_')) return;
   const [, action, draftId] = callback.data.split(':');
   const draft = aiDrafts.get(draftId);
@@ -828,24 +842,24 @@ async function leaderNaturalLanguageReply(message) {
   }
 }
 
-async function leaderCallback(callback) {
+async function leaderCallback(callback, token=config.leaderToken) {
   if (callback.data.startsWith('group_send:') || callback.data.startsWith('group_cancel:')) {
-    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can send project messages.');
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(token, callback.id, 'Only the founder can send project messages.');
     const [action, draftId] = callback.data.split(':');
     const draft = founderGroupMessageDrafts.get(draftId);
     if (!draft || Date.now() - draft.createdAt > 15 * 60 * 1000) {
       founderGroupMessageDrafts.delete(draftId);
-      return answerCallback(config.leaderToken, callback.id, 'This draft expired. Please ask me to prepare the message again.');
+      return answerCallback(token, callback.id, 'This draft expired. Please ask me to prepare the message again.');
     }
     if (action === 'group_cancel') {
       founderGroupMessageDrafts.delete(draftId);
-      return answerCallback(config.leaderToken, callback.id, 'Cancelled. No group message was sent.');
+      return answerCallback(token, callback.id, 'Cancelled. No group message was sent.');
     }
-    if (draft.sending) return answerCallback(config.leaderToken, callback.id, 'This message is already being sent.');
+    if (draft.sending) return answerCallback(token, callback.id, 'This message is already being sent.');
     const project = await store.projectById(draft.projectId);
     if (!project || !project.GroupChatID || ['Completed', 'Abandoned'].includes(project.Status)) {
       founderGroupMessageDrafts.delete(draftId);
-      return answerCallback(config.leaderToken, callback.id, 'This project group is no longer active.');
+      return answerCallback(token, callback.id, 'This project group is no longer active.');
     }
     draft.sending = true;
     try {
@@ -853,77 +867,77 @@ async function leaderCallback(callback) {
     } catch (error) {
       draft.sending = false;
       console.error('Founder group message error:', error.message);
-      await answerCallback(config.leaderToken, callback.id, 'Could not send to the project group.');
-      return sendMessage(config.leaderToken, callback.message.chat.id, `I could not post to <b>${escape(project.ProjectName)}</b>. Please check that the project group bot is still in that group, then tap Send again.`);
+      await answerCallback(token, callback.id, 'Could not send to the project group.');
+      return sendMessage(token, callback.message.chat.id, `I could not post to <b>${escape(project.ProjectName)}</b>. Please check that the project group bot is still in that group, then tap Send again.`);
     }
     founderGroupMessageDrafts.delete(draftId);
-    await answerCallback(config.leaderToken, callback.id, 'Sent to the project group.');
+    await answerCallback(token, callback.id, 'Sent to the project group.');
     try {
       await store.audit({ projectId: project.ProjectID, action: 'Founder group message sent', actor: callback.from.id, actorName: actor(callback.from).name, source: 'Telegram founder bot', details: draft.text });
     } catch (error) {
       console.error('Founder group message audit error:', error.message);
     }
-    return sendMessage(config.leaderToken, callback.message.chat.id, `✅ Sent to <b>${escape(project.ProjectName)}</b>.`);
+    return sendMessage(token, callback.message.chat.id, `✅ Sent to <b>${escape(project.ProjectName)}</b>.`);
   }
   if (callback.data.startsWith('close_project:')) {
-    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can close a project.');
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(token, callback.id, 'Only the founder can close a project.');
     const [, projectId, decision] = callback.data.split(':');
     const project = await store.projectById(projectId);
-    if (!project) return answerCallback(config.leaderToken, callback.id, 'This project no longer exists.');
+    if (!project) return answerCallback(token, callback.id, 'This project no longer exists.');
     if (decision === 'keep_active') {
       await store.audit({ projectId, action: 'Founder departure dismissed', actor: callback.from.id, actorName: actor(callback.from).name, source: 'Telegram founder bot', details: 'Founder chose to keep the project active.' });
-      await answerCallback(config.leaderToken, callback.id, 'Project remains active.');
-      return sendMessage(config.leaderToken, callback.message.chat.id, `Got it — <b>${escape(project.ProjectName)}</b> remains active. Nothing was changed.`);
+      await answerCallback(token, callback.id, 'Project remains active.');
+      return sendMessage(token, callback.message.chat.id, `Got it — <b>${escape(project.ProjectName)}</b> remains active. Nothing was changed.`);
     }
     const outcome = decision === 'completed' ? 'Completed' : decision === 'abandoned' ? 'Abandoned' : '';
-    if (!outcome) return answerCallback(config.leaderToken, callback.id, 'Unknown project-closure decision.');
-    if (['Completed', 'Abandoned'].includes(project.Status)) return answerCallback(config.leaderToken, callback.id, 'This project is already closed.');
+    if (!outcome) return answerCallback(token, callback.id, 'Unknown project-closure decision.');
+    if (['Completed', 'Abandoned'].includes(project.Status)) return answerCallback(token, callback.id, 'This project is already closed.');
     try {
       const result = await store.closeProject({ project, outcome, actorTelegramId: callback.from.id, actorName: actor(callback.from).name });
-      await answerCallback(config.leaderToken, callback.id, `Project marked ${outcome.toLowerCase()}.`);
-      await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(project.ProjectName)}</b> is now <b>${outcome.toLowerCase()}</b>.\n\nNo data was deleted. ${result.closedTasks} unfinished task(s) were closed, and ${result.deactivatedMembers} project member record(s) were deactivated.`);
+      await answerCallback(token, callback.id, `Project marked ${outcome.toLowerCase()}.`);
+      await sendMessage(token, callback.message.chat.id, `✅ <b>${escape(project.ProjectName)}</b> is now <b>${outcome.toLowerCase()}</b>.\n\nNo data was deleted. ${result.closedTasks} unfinished task(s) were closed, and ${result.deactivatedMembers} project member record(s) were deactivated.`);
       return sendMessage(config.groupToken, project.GroupChatID, `<b>Project closed — ${escape(outcome)}</b>\n\nThe founder closed this project. Its full history is retained, but task updates are no longer active.`);
     } catch (error) {
       console.error('Project closure error:', error.message);
-      return answerCallback(config.leaderToken, callback.id, 'Could not close this project. Check the Railway logs.');
+      return answerCallback(token, callback.id, 'Could not close this project. Check the Railway logs.');
     }
   }
   if (callback.data.startsWith('choose_plan:')) {
-    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can assign a project plan.');
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(token, callback.id, 'Only the founder can assign a project plan.');
     const [, projectId, workflowId] = callback.data.split(':');
     const option = WORKFLOW_OPTIONS.find((item) => item.id === workflowId);
     const project = await store.projectById(projectId);
-    if (!option || !project) return answerCallback(config.leaderToken, callback.id, 'That project plan is no longer available.');
+    if (!option || !project) return answerCallback(token, callback.id, 'That project plan is no longer available.');
     const existingTasks = await store.tasksForProject(projectId);
     const legacyPlan = isUntouchedLegacyPlan(project, existingTasks);
-    if (existingTasks.length && !legacyPlan) return answerCallback(config.leaderToken, callback.id, 'This project already has active work, so its plan cannot be replaced automatically.');
+    if (existingTasks.length && !legacyPlan) return answerCallback(token, callback.id, 'This project already has active work, so its plan cannot be replaced automatically.');
     try {
-      if (project.WebManaged === 'Yes' || (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET)) return answerCallback(config.leaderToken, callback.id, 'Choose the project type in the web app.');
+      if (project.WebManaged === 'Yes' || (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET)) return answerCallback(token, callback.id, 'Choose the project type in the web app.');
       const { assignWorkflowToProject } = await import('./project-service.js');
       const result = await assignWorkflowToProject({ store, project, workflowId, actorTelegramId: config.founderTelegramId, replaceUntouchedLegacyPlan: legacyPlan });
-      await answerCallback(config.leaderToken, callback.id, 'Project plan assigned.');
-      await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(option.label)}</b> assigned to <b>${escape(project.ProjectName)}</b>.\n${result.taskCount} tasks generated. Planned finish: ${escape(result.targetEndDate)}.`);
+      await answerCallback(token, callback.id, 'Project plan assigned.');
+      await sendMessage(token, callback.message.chat.id, `✅ <b>${escape(option.label)}</b> assigned to <b>${escape(project.ProjectName)}</b>.\n${result.taskCount} tasks generated. Planned finish: ${escape(result.targetEndDate)}.`);
       await sendMessage(config.groupToken, project.GroupChatID, `<b>Project plan assigned — ${escape(option.label)}</b>\n\n${planOverview(result.workflow)}\n\n${result.taskCount} tasks are now active. Use /tasks to see the full plan.`);
       await requestClientResources(project, result.workflow);
       await shareWorkflowResources(project, workflowId);
       return;
     } catch (error) {
       console.error('Workflow assignment error:', error.message);
-      return answerCallback(config.leaderToken, callback.id, 'Could not assign this plan. Check the Railway logs.');
+      return answerCallback(token, callback.id, 'Could not assign this plan. Check the Railway logs.');
     }
   }
   if (callback.data.startsWith('onboard_role:')) {
-    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can assign project roles.');
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(token, callback.id, 'Only the founder can assign project roles.');
     const onboarding = await store.onboarding(callback.data.slice('onboard_role:'.length));
-    if (!onboarding || onboarding.Status !== 'Pending') return answerCallback(config.leaderToken, callback.id, 'This member profile is no longer pending.');
+    if (!onboarding || onboarding.Status !== 'Pending') return answerCallback(token, callback.id, 'This member profile is no longer pending.');
     founderRoleAssignments.set(callback.message.chat.id, onboarding.OnboardingID);
-    await answerCallback(config.leaderToken, callback.id, 'Reply with name and role.');
-    return sendMessage(config.leaderToken, callback.message.chat.id, `Reply with this member’s profile in one line:\n<code>Full name | Role</code>\n\nExample: <code>Rahul Sharma | Electrical contractor</code>`);
+    await answerCallback(token, callback.id, 'Reply with name and role.');
+    return sendMessage(token, callback.message.chat.id, `Reply with this member’s profile in one line:\n<code>Full name | Role</code>\n\nExample: <code>Rahul Sharma | Electrical contractor</code>`);
   }
   if (callback.data.startsWith('create_group:')) {
-    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(config.leaderToken, callback.id, 'Only the founder can create a project.');
+    if (String(callback.from.id) !== config.founderTelegramId) return answerCallback(token, callback.id, 'Only the founder can create a project.');
     const session = projectCreation.get(callback.message.chat.id);
-    if (!session || session.step !== 'group') return answerCallback(config.leaderToken, callback.id, 'Project creation session expired. Start /createproject again.');
+    if (!session || session.step !== 'group') return answerCallback(token, callback.id, 'Project creation session expired. Start /createproject again.');
     const groupChatId = callback.data.slice('create_group:'.length);
     try {
       const projectId = await nextProjectId();
@@ -933,21 +947,25 @@ async function leaderCallback(callback) {
         startDateText: session.startDateText, groupChatId, leaderTelegramId: config.founderTelegramId,
       });
       projectCreation.delete(callback.message.chat.id);
-      await answerCallback(config.leaderToken, callback.id, 'Project created.');
-      await sendMessage(config.leaderToken, callback.message.chat.id, `✅ <b>${escape(session.projectName)}</b> created as <code>${projectId}</code>.\n\nIt is waiting for the client to join the group. Once you approve their role as <b>Client</b>, I’ll ask you which plan to assign.`);
+      await answerCallback(token, callback.id, 'Project created.');
+      await sendMessage(token, callback.message.chat.id, `✅ <b>${escape(session.projectName)}</b> created as <code>${projectId}</code>.\n\nIt is waiting for the client to join the group. Once you approve their role as <b>Client</b>, I’ll ask you which plan to assign.`);
       return sendMessage(config.groupToken, groupChatId, `🏠 <b>${escape(session.projectName)}</b> is now connected.\n\nAdd the client to this group. Once the founder confirms them as <b>Client</b>, the founder bot will select the project plan and share its linked resources here.`);
     } catch (error) {
       console.error('Project creation error:', error.message);
-      return answerCallback(config.leaderToken, callback.id, 'Could not create project. Check the logs.');
+      return answerCallback(token, callback.id, 'Could not create project. Check the logs.');
     }
   }
   const [decision, approvalId] = callback.data.split(':');
+  if(!['approve','reject'].includes(decision))return answerCallback(token,callback.id,'Unknown action.');
+  return decideApprovalOnce(approvalId, async () => {
   const approval = (await store.approvals()).find((item) => item.ApprovalID === approvalId);
-  if (!approval) return answerCallback(config.leaderToken, callback.id, 'Approval is no longer pending.');
+  if (!approval) return answerCallback(token, callback.id, 'Approval is no longer pending.');
   const project = await store.projectById(approval.ProjectID);
+  if (!project || ['Completed', 'Abandoned'].includes(project.Status)) return answerCallback(token, callback.id, 'This project is closed.');
   const isFounder = String(callback.from.id) === config.founderTelegramId;
-  const isProjectLead = project && String(callback.from.id) === String(project.LeaderTelegramID);
-  if (!isFounder && !isProjectLead) return answerCallback(config.leaderToken, callback.id, 'Only the founder or project lead can decide.');
+  const reviewer = project && await store.groupMember(project.GroupChatID,callback.from.id);
+  const isProjectLead = project && (String(callback.from.id) === String(project.LeaderTelegramID) || (reviewer?.MembershipStatus==='Active' && hasRole(reviewer.AssignedRole,'Founder')));
+  if (!isFounder && !isProjectLead) return answerCallback(token, callback.id, 'Only the founder or project lead can decide.');
   const task = await store.task(approval.TaskID);
   const status = decision === 'approve' ? 'Approved' : 'Rejected';
   // Every plan goes through the engine. Legacy rows get their forecast seeded from current dates first.
@@ -966,9 +984,10 @@ async function leaderCallback(callback) {
     if (finish && project && finish !== project.TargetEndDate) await store.updateRow('Projects', project.rowNumber, { TargetEndDate: finish });
   }
   await store.audit({ projectId: approval.ProjectID, taskId: task.TaskID, action: `Delay ${status.toLowerCase()}`, oldValue: 'Delay Requested', newValue: status, actor: callback.from.id, actorName: actor(callback.from).name, source: 'Telegram leader bot', details: approval.Reason });
-  await answerCallback(config.leaderToken, callback.id, `Delay ${status.toLowerCase()}.`);
-  await sendMessage(config.leaderToken, callback.message.chat.id, `✅ Delay request <code>${approvalId}</code> ${status.toLowerCase()}.`);
+  await answerCallback(token, callback.id, `Delay ${status.toLowerCase()}.`);
+  if(String(callback.message.chat.id)!==String(project.GroupChatID))await sendMessage(token, callback.message.chat.id, `✅ Delay request <code>${approvalId}</code> ${status.toLowerCase()}.`);
   return sendMessage(config.groupToken, approval.GroupChatID, `${decision === 'approve' ? '✅' : '❌'} The founder ${status.toLowerCase()} the delay for <b>${escape(task.TaskName)}</b>.\nReason: ${escape(approval.Reason)}`);
+  }, () => answerCallback(token, callback.id, 'This approval is already being decided.'));
 }
 
 poll(config.groupToken, 'Project group bot', async (update) => {
@@ -1001,7 +1020,8 @@ poll(config.groupToken, 'Project group bot', async (update) => {
   if (update.message && groupOnly(update.message.chat)) {
     const project = await store.projectForGroup(String(update.message.chat.id));
     if (project && !['Completed','Abandoned'].includes(project.Status)) {
-      const request = parseClientRequest(update.message, project, groupBotProfile.username);
+      const client = await store.groupMember(project.GroupChatID,update.message.from?.id);
+      const request = client?.MembershipStatus==='Active' && hasRole(client.AssignedRole,'Client') ? parseClientRequest(update.message, {...project,ClientTelegramIDs:String(client.TelegramUserID)}, groupBotProfile.username) : null;
       if (request) {
         const result = await captureDecisionRequest(store, project, request);
         try { await syncCapturedDecisionRequest(store, project, result.request); }

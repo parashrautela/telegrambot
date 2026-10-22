@@ -12,7 +12,7 @@ export const SHEETS = {
   ],
   Projects: [
     'ProjectID', 'ProjectName', 'ClientName', 'Location', 'Status',
-    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes', 'ClientTelegramID', 'WebManaged', 'WorkflowAnnouncementStatus',
+    'LeaderTelegramID', 'GroupChatID', 'StartDate', 'TargetEndDate', 'Notes', 'ClientTelegramID', 'WebManaged', 'WorkflowAnnouncementStatus', 'ClientTelegramIDs',
   ],
   WorkflowTemplates: [
     'WorkflowID', 'Sequence', 'Stage', 'TaskName', 'DurationDays',

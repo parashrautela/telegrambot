@@ -1,3 +1,4 @@
+import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
 import { buildScheduledTasks, isGraphTemplate } from './workflow-engine.js';
 
 const dateText = (date) => date.toISOString().slice(0, 10);
@@ -41,16 +42,16 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
   // A client name alone is not proof that a client has been assigned.
   const [groupMembers, onboardings] = await Promise.all([store.rows('GroupMembers'), store.rows('MemberOnboarding')]);
   const candidates = groupMembers.filter((member) => String(member.GroupChatID) === String(project.GroupChatID)
-    && member.MembershipStatus === 'Active' && /\bclient\b/i.test(member.AssignedRole || ''))
+    && member.MembershipStatus === 'Active' && hasRole(member.AssignedRole, 'Client'))
     .map((member) => ({ telegramId: String(member.TelegramUserID), name: member.AssignedName }));
-  for (const member of onboardings.filter((member) => member.ProjectID === project.ProjectID && member.Status === 'Approved' && /\bclient\b/i.test(member.AssignedRole || ''))) {
+  for (const member of onboardings.filter((member) => member.ProjectID === project.ProjectID && member.Status === 'Approved' && hasRole(member.AssignedRole, 'Client'))) {
     const roster = groupMembers.find((row) => String(row.GroupChatID) === String(project.GroupChatID) && String(row.TelegramUserID) === String(member.TelegramUserID));
-    if (roster && roster.MembershipStatus !== 'Active') continue;
+    if (roster && (roster.MembershipStatus !== 'Active' || !hasRole(roster.AssignedRole,'Client'))) continue;
     if (!candidates.some((row) => row.telegramId === String(member.TelegramUserID))) candidates.push({ telegramId: String(member.TelegramUserID), name: member.AssignedName });
   }
   const assignedClient = project.ClientTelegramID
-    ? candidates.find((member) => member.telegramId === String(project.ClientTelegramID))
-    : candidates.find((member) => member.name?.trim().toLowerCase() === String(clientName || project.ClientName || '').trim().toLowerCase()) || (candidates.length === 1 ? candidates[0] : null);
+    ? candidates.find(member => member.telegramId === String(project.ClientTelegramID))
+    : candidates.find(member => member.name?.trim().toLowerCase() === String(clientName || project.ClientName || '').trim().toLowerCase()) || candidates[0];
   if (!assignedClient) throw new Error('An active, approved client must be assigned before selecting a workflow.');
   const existingTasks = await store.tasksForProject(project.ProjectID);
   if (existingTasks.length && !replaceUntouchedLegacyPlan) throw new Error('This project already has a workflow assigned.');
@@ -114,6 +115,7 @@ export async function assignWorkflowToProject({ store, project, workflowId, clie
   await store.updateRow('Projects', project.rowNumber, {
     ClientName: assignedClient.name || clientName || project.ClientName,
     ClientTelegramID: assignedClient.telegramId,
+    ClientTelegramIDs: candidates.map(member=>member.telegramId).join(","),
     Status: 'Active',
     TargetEndDate: scheduledTargetEnd,
     Notes: `Workflow ${workflowId} assigned after client onboarding${replaceUntouchedLegacyPlan ? '; untouched legacy HOUSE-V1 tasks archived.' : ''}`,

@@ -20,6 +20,7 @@ export const answerCallback = (token, callbackId, text = '') => api(token, 'answ
 export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'] });
 export const getMe = (token) => api(token, 'getMe');
 export const getChatMember = (token, chatId, userId) => api(token, 'getChatMember', { chat_id: chatId, user_id: userId });
+export const getChatMemberCount = (token, chatId) => api(token, 'getChatMemberCount', { chat_id: chatId });
 export const getChatAdministrators = (token, chatId) => api(token, 'getChatAdministrators', { chat_id: chatId });
 // The list Telegram shows when someone types "/" in a chat.
 export const setMyCommands = (token, commands, scope) => api(token, 'setMyCommands', { commands, ...(scope ? { scope } : {}) });

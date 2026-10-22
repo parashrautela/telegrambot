@@ -21,6 +21,7 @@ test('web bridge assigns a group role and creates a linked project shell', async
   const tasks=[];
   const requests=[{RequestID:'req',GroupChatID:'-456',SourceMessageID:'10',AttachmentsJSON:JSON.stringify([{type:'Photo',fileId:'photo'}]),rowNumber:2}];
   const store = {
+    upsertGroupMember: async()=>{},
     groupSnapshot: async()=>[{groupChatId:'-456',title:'Site Group',status:'Available',members:[]}],
     rows: async (sheet) => ({ GroupRegistry: groups, GroupMembers: members, Projects: projects, DecisionRequests:requests,Tasks:tasks }[sheet] || []),
     assignGroupRole: async ({ name, role }) => { members[0].AssignedName = name; members[0].AssignedRole = role; return true; },
@@ -34,6 +35,9 @@ test('web bridge assigns a group role and creates a linked project shell', async
   };
   const sent = [];
   globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith('/getMe')) return Response.json({ok:true,result:{id:99,username:'test_bot'}});
+    if (String(url).endsWith('/getChatMemberCount')) return Response.json({ok:true,result:2});
+    if (String(url).endsWith('/getChatAdministrators')) return Response.json({ok:true,result:[]});
     if (String(url).endsWith('/getFile')) return Response.json({ok:true,result:{file_path:'photos/a.jpg'}});
     if(String(url).includes('/file/bot')) return new Response('PHOTO');
     if (String(url).endsWith('/getChatMember')) return Response.json({ ok: true, result: { status: 'member', user: { first_name: 'Asha' } } });

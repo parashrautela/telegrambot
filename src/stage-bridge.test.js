@@ -141,3 +141,20 @@ test('the default plan is served in six-slot stages', async () => {
     assert.equal(plan.body.stages[0].tasks.length, 6);
   } finally { await close(); }
 });
+
+test('stage wires preview without writes, apply with a fingerprint and protect started work',async()=>{
+ const {tasks,post,close}=await bridge();
+ try{
+  const stage=(name,placement)=>({name,custom:true,placement,tasks:[{key:'inspection',title:'Inspection',role:'Site Supervisor',durationDays:2}]});
+  await post('/api/integrations/web/stages/add',{groupChatId:'-900',mode:'apply',stages:[stage('A',{type:'date',startDate:'2026-11-01'}),stage('B',{type:'after',stageName:'A'}),stage('C',{type:'after',stageName:'B'})]});
+  assert.equal(tasks.length,3);
+  const links=[{source:'A',target:'B',type:'SS'},{source:'A',target:'C',type:'FS'},{source:'B',target:'C',type:'FS'}];
+  const route='/api/integrations/web/stages/connections';
+  const preview=await post(route,{groupChatId:'-900',mode:'preview',links});assert.equal(preview.status,200);assert.equal(tasks[1].ForecastStart,'2026-11-03');
+  assert.equal((await post(route,{groupChatId:'-900',mode:'apply',links,fingerprint:'stale'})).status,409);
+  assert.equal((await post(route,{groupChatId:'-900',mode:'apply',links,fingerprint:preview.body.fingerprint})).status,200);
+  assert.equal(tasks[1].ForecastStart,'2026-11-01');assert.equal(tasks[2].PredecessorTaskIDs.split(',').length,2);
+  tasks[1].ActualStart='2026-11-01';
+  assert.equal((await post(route,{groupChatId:'-900',mode:'preview',links:[]})).status,409);
+ }finally{await close();}
+});
