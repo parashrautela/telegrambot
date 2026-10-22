@@ -87,3 +87,9 @@ test('/query and /update are the group tags; plain team chat is ignored', () => 
   assert.equal(parseClientRequest({ ...message, from: { id: 1, first_name: 'Worker' }, text: 'ping' }, project, 'our_bot'), null);
   assert.equal(parseClientRequest({ ...message, from: { id: 50, first_name: 'Client' }, text: 'When is handover?' }, project, 'our_bot').AutomaticClientQuery, 'Yes');
 });
+
+test('automatic client messages accept every current client and reject other people',()=>{
+ const project={GroupChatID:'-123',ClientTelegramID:'42',ClientTelegramIDs:'42,43'};
+ for(const id of [42,43])assert.ok(parseClientRequest({...message,from:{id,first_name:'Client'},text:'Please review the drawing'},project,'our_bot'));
+ assert.equal(parseClientRequest({...message,from:{id:44},text:'Other conversation'},project,'our_bot'),null);
+});

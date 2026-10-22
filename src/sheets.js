@@ -1,3 +1,4 @@
+import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
 import crypto from 'node:crypto';
 import { googleConfig } from './config.js';
 import { SHEETS, WORKFLOWS, templateRecord } from './schema.js';
@@ -212,11 +213,15 @@ export class SheetStore {
     if (!member || member.is_bot) return;
     const existing = (await this.rows('GroupMembers')).find((row) => String(row.GroupChatID) === String(groupChatId) && String(row.TelegramUserID) === String(member.id));
     const changes = { TelegramName: [member.first_name, member.last_name].filter(Boolean).join(' ') || member.username || 'Unknown', MembershipStatus: status, UpdatedAt: now() };
+    if (existing && existing.TelegramName === changes.TelegramName && existing.MembershipStatus === status) return false;
     if (existing) await this.updateRow('GroupMembers', existing.rowNumber, changes);
     else await this.append('GroupMembers', { GroupChatID: String(groupChatId), TelegramUserID: String(member.id), ...changes }, { raw: true });
+    return true;
   }
 
   async assignGroupRole({ groupChatId, telegramUserId, name, role }) {
+    role = roleText(role);
+    if (!role || role.length > 160 || rolesOf(role).length > 6) throw new Error("Choose between one and six project roles.");
     const existing = (await this.rows('GroupMembers')).find((row) => String(row.GroupChatID) === String(groupChatId) && String(row.TelegramUserID) === String(telegramUserId));
     if (!existing || existing.MembershipStatus !== 'Active') throw new Error('This member is not active in the group.');
     const changed = existing.AssignedName !== name || existing.AssignedRole !== role;

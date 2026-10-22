@@ -1,15 +1,17 @@
+import {planStageConnections,connectionFingerprint} from './stage-connections.js';
+import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
+import { refreshGroupMembers, activeMembership } from './group-discovery.js';
 import http from 'node:http';
 import { loadTelegramAttachment } from './telegram-media.js';
 import { timingSafeEqual } from 'node:crypto';
 import { createProjectShell, assignWorkflowToProject } from './project-service.js';
-import { getChatMember, sendMessage } from './telegram.js';
+import { getChatMember, getMe, sendMessage } from './telegram.js';
 
 import { downloadProjectResource } from './drive-storage.js';
 import { BLANK_WORKFLOW_ID, WORKFLOW_OPTIONS } from './schema.js';
 import { projectedFinish, rescheduleTasks, withForecastDefaults } from './workflow-engine.js';
 import { STAGE_WORKFLOW_ID, buildStagePlan, defaultPlanStages, insertStageTask, editStageTask, renameStage, planTaskAction, scheduleSentence } from './stage-plan.js';
 
-const active = new Set(['creator', 'owner', 'administrator', 'member', 'restricted']);
 const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
 const respond = (res, code, data) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); };
 const equal = (a, b) => { const left = Buffer.from(String(a)); const right = Buffer.from(String(b)); return left.length === right.length && timingSafeEqual(left, right); };
@@ -202,6 +204,8 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           const groupMembers = (await store.rows('GroupMembers')).filter((member) => String(member.GroupChatID) === String(project.GroupChatID));
           const options = { projectId: project.ProjectID, groupMembers, lastUpdatedBy: founderTelegramId, today: new Date().toISOString().slice(0, 10) };
           const stamp = new Date().toISOString();
+          const identify=task=>{if(task?.assigneeTelegramId==='founder')task.assigneeTelegramId=String(project.LeaderTelegramID || founderTelegramId);};
+          identify(input);identify(input.task);for(const spec of (Array.isArray(input.stages)?input.stages:[input.stage]))for(const task of spec?.tasks || [])identify(task);
 
           if (req.url.endsWith('/stages/rename')) {
             const changes = renameStage(rows, input.stageName, input.name);
@@ -315,20 +319,82 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           return respond(res,200,{ok:true,result:{message_id:result.result.message_id}});
         } finally { replyingRequests.delete(request.RequestID); }
       }
-      if(req.method==='POST' && req.url==='/api/integrations/web/groups')return respond(res,200,{groups:await store.groupSnapshot()});
+      if(req.method==='POST' && req.url==='/api/integrations/web/stages/connections') {
+        const input=await readBody(req),project=await store.projectForGroup(String(input.groupChatId || ''));
+        if(!project || ['Completed','Abandoned'].includes(project.Status))return respond(res,409,{error:'Choose an active linked project.'});
+        if(!['preview','apply'].includes(input.mode))return respond(res,400,{error:'Choose preview or apply.'});
+        const lockKey='tasks:'+project.ProjectID;if(startingProjects.has(lockKey))return respond(res,409,{error:'A schedule change is already in progress.'});startingProjects.add(lockKey);
+        try {
+          const rows=(await store.tasksForProject(project.ProjectID)).filter(row=>!/^(Archived|Cancelled|Closed)/.test(row.Status));
+          const normalized=rows.map(row=>({id:row.TaskID,stageId:row.Stage,title:row.TaskName,sequence:row.Sequence,start:effectiveStart(row),end:effectiveEnd(row),status:row.Status,actualStart:row.ActualStart,dependencies:(row.PredecessorTaskIDs || (row.PredecessorTaskID?row.PredecessorTaskID+':FS':'')).split(',').filter(Boolean).map(edge=>({id:edge.split(':')[0],type:edge.split(':')[1] || 'FS'}))}));
+          const fingerprint=connectionFingerprint(normalized);
+          if(input.mode==='apply' && input.fingerprint!==fingerprint)return respond(res,409,{error:'The schedule changed. Preview the connections again.'});
+          const plan=planStageConnections(normalized,input.links);
+          if(input.mode==='apply') {
+            await store.updateRows('Tasks',plan.tasks.filter(task=>plan.changedIds.includes(task.id) || plan.affected.some(move=>move.taskId===task.id)).map(task=>{const row=rows.find(row=>row.TaskID===task.id);return {rowNumber:row.rowNumber,changes:{PredecessorTaskIDs:task.dependencies.map(edge=>edge.id+':'+edge.type).join(','),PredecessorTaskID:task.dependencies.find(edge=>edge.type==='FS')?.id || '',ForecastStart:task.start,ForecastEnd:task.end,CurrentStart:task.start,CurrentEnd:task.end,LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(founderTelegramId)}};}));
+            if(plan.finish)await store.updateRow('Projects',project.rowNumber,{TargetEndDate:plan.finish});
+            await store.audit({projectId:project.ProjectID,action:'Stage connections updated',actor:founderTelegramId,actorName:input.actorName || 'Founder',source:'Web timeline',details:JSON.stringify(plan.links)});
+          }
+          return respond(res,200,{ok:true,affected:plan.affected,finish:plan.finish,links:plan.links,fingerprint,tasks:input.mode==='apply'?await store.tasksForProject(project.ProjectID):undefined});
+        }finally{startingProjects.delete(lockKey);}
+      }
+      if(req.method==='POST' && req.url==='/api/integrations/web/work/snapshot') {
+        const input=await readBody(req);
+        if(!Array.isArray(input.groupChatIds) || input.groupChatIds.length>100 || input.groupChatIds.some(id=>!/^\-?\d+$/.test(String(id))))return respond(res,400,{error:'Invalid group snapshot request.'});
+        const [projects,tasks]=await Promise.all([store.rows('Projects'),store.rows('Tasks')]);
+        return respond(res,200,{projects:projects.filter(project=>input.groupChatIds.includes(String(project.GroupChatID))).map(project=>({groupChatId:String(project.GroupChatID),leaderTelegramId:String(project.LeaderTelegramID || founderTelegramId),tasks:tasks.filter(task=>task.ProjectID===project.ProjectID)}))});
+      }
+      if(req.method==='POST' && req.url==='/api/integrations/web/personal/profile')return respond(res,200,{username:(await getMe(token)).username});
+      if(req.method==='POST' && req.url==='/api/integrations/web/personal/send') {
+        const input=await readBody(req);
+        if(!/^\d+$/.test(String(input.telegramUserId || '')) || typeof input.text!=='string' || !input.text.trim() || input.text.length>4000)return respond(res,400,{error:'Invalid personal task digest.'});
+        if(!(await store.user(input.telegramUserId)))return respond(res,403,{error:'This Telegram user is not active.'});
+        const message=await sendMessage(token,input.telegramUserId,escape(input.text));
+        return respond(res,200,{messageId:message.message_id});
+      }
+      if(req.method==='POST' && req.url==='/api/integrations/web/supervisors/replace') {
+        const input=await readBody(req);
+        if(!Array.isArray(input.groups) || !input.groups.length || input.groups.length>100 || !/^\d+$/.test(String(input.toTelegramUserId || '')) || typeof input.toName!=='string' || !input.toName.trim() || input.toName.length>100)return respond(res,400,{error:'Invalid supervisor replacement.'});
+        const changes=[];
+        // Verify every target group before writing any group, so non-members never gain responsibility.
+        for(const group of input.groups){
+          const project=await store.projectForGroup(String(group.groupChatId));
+          if(!project || ['Completed','Abandoned'].includes(project.Status))return respond(res,409,{error:'Choose active linked projects.'});
+          const membership=await getChatMember(token,group.groupChatId,input.toTelegramUserId);
+          if(!activeMembership(membership))return respond(res,409,{error:'Add the replacement to each selected Telegram group first.'});
+          const rows=await store.tasksForProject(project.ProjectID);
+          if(!Array.isArray(group.taskIds) || group.taskIds.some(id=>!rows.some(row=>row.TaskID===id)))return respond(res,400,{error:'Task does not belong to its selected project.'});
+          changes.push({group,project,rows,membership});
+        }
+        for(const {group,rows,membership} of changes){
+          await store.upsertGroupMember(group.groupChatId,membership.user,'Active');
+          const previous=await store.groupMember(group.groupChatId,input.toTelegramUserId);
+          await store.assignGroupRole({groupChatId:group.groupChatId,telegramUserId:input.toTelegramUserId,name:input.toName,role:roleText([...rolesOf(previous?.AssignedRole),'Site Supervisor'])});
+          if(input.fromTelegramUserId){const old=await store.groupMember(group.groupChatId,input.fromTelegramUserId);if(old)await store.updateRow('GroupMembers',old.rowNumber,{AssignedRole:roleText(rolesOf(old.AssignedRole).filter(role=>!matchesRole(role,'Site Supervisor')))});}
+          await store.updateRows('Tasks',rows.filter(row=>group.taskIds.includes(row.TaskID) && row.Status!=='Completed' && !/^(Archived|Cancelled|Closed)/.test(row.Status)).map(row=>({rowNumber:row.rowNumber,changes:{AssignedTelegramID:String(input.toTelegramUserId),AssignedName:input.toName,LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(founderTelegramId)}})));
+        }
+        return respond(res,200,{ok:true});
+      }
+      if(req.method==='POST' && req.url==='/api/integrations/web/groups') {
+        const input = await readBody(req);
+        if (input.groupChatId && !/^-?\d+$/.test(String(input.groupChatId))) return respond(res,400,{error:'Invalid Telegram group ID.'});
+        return respond(res,200,await refreshGroupMembers({store,token,groupChatId:input.groupChatId,telegramUserId:input.telegramUserId}));
+      }
       if (req.method === 'POST' && req.url === '/api/integrations/web/group-members') {
         const input = await readBody(req);
         const groupChatId = String(input.groupChatId || '');
         const telegramUserId = String(input.telegramUserId || '');
-        const name = String(input.name || '').trim(); const role = String(input.role || '').trim();
-        if (!/^-?\d+$/.test(groupChatId) || !/^\d+$/.test(telegramUserId) || !name || !role || name.length > 100 || role.length > 80) return respond(res, 400, { error: 'Invalid group member profile.' });
+        const name = String(input.name || '').trim(); const role = roleText(input.roles || input.role);
+        if (!/^-?\d+$/.test(groupChatId) || !/^\d+$/.test(telegramUserId) || !name || !role || name.length > 100 || role.length > 160) return respond(res, 400, { error: 'Invalid group member profile.' });
         const group = (await store.rows('GroupRegistry')).find((item) => String(item.GroupChatID) === groupChatId);
         if (!group) return respond(res, 404, { error: 'Telegram group not found.' });
         const membership = await getChatMember(token, groupChatId, telegramUserId);
-        if (!active.has(membership.status)) return respond(res, 409, { error: 'This person is no longer in the Telegram group.' });
+        if (!activeMembership(membership)) return respond(res, 409, { error: 'This person is no longer in the Telegram group.' });
         const changed = await store.assignGroupRole({ groupChatId, telegramUserId, name, role });
         const project = await store.projectForGroup(groupChatId);
         if (project) {
+          const clients = (await store.rows('GroupMembers')).filter(member=>String(member.GroupChatID)===groupChatId && member.MembershipStatus==='Active' && hasRole(member.AssignedRole,'Client'));
+          await store.updateRow('Projects',project.rowNumber,{ClientTelegramIDs:clients.map(member=>member.TelegramUserID).join(','),ClientTelegramID:clients[0]?.TelegramUserID || '',ClientName:clients.map(member=>member.AssignedName || member.TelegramName).join(', ')});
           const onboarding = await store.onboardingForMember(project.ProjectID, telegramUserId);
           if (onboarding?.Status === 'Pending') await store.approveOnboarding(onboarding, { name, role, founderTelegramId });
           if (!onboarding) await store.append('MemberOnboarding', { OnboardingID: `ONB-WEB-${groupChatId}-${telegramUserId}`, ProjectID: project.ProjectID, GroupChatID: groupChatId, TelegramUserID: telegramUserId, TelegramName: membership.user?.first_name || name, JoinedAt: new Date().toISOString(), Status: 'Approved', AssignedName: name, AssignedRole: role, ApprovedAt: new Date().toISOString(), ApprovedByTelegramID: String(founderTelegramId) }, { raw: true });
@@ -376,7 +442,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         if (['Completed','Abandoned'].includes(project.Status)) return respond(res,409,{error:'This project is closed.'});
         await store.updateRow('Projects',project.rowNumber,{WebManaged:'Yes'});
         const roster = (await store.rows('GroupMembers')).filter((member)=>String(member.GroupChatID)===groupChatId && member.MembershipStatus==='Active');
-        if (roster.length < 2 || roster.some((member)=>!member.AssignedName || !member.AssignedRole) || roster.filter((member)=>/\bclient\b/i.test(member.AssignedRole)).length!==1 || !roster.some((member)=>!/\b(client|founder)\b/i.test(member.AssignedRole))) return respond(res,409,{error:'Assign one client and at least one team member, and finish all member profiles first.'});
+        if (roster.length < 2 || roster.some((member)=>!member.AssignedName || !member.AssignedRole) || !roster.some(member=>hasRole(member.AssignedRole,'Client')) || !roster.some(member=>isStaff(member.AssignedRole))) return respond(res,409,{error:'Assign at least one client and one team member, and finish all member profiles first.'});
         // Web-added stages and custom tasks are not a template, so they never count as "a different workflow".
         let tasks = (await store.tasksForProject(project.ProjectID)).filter((task)=>!String(task.Status).startsWith('Archived') && !['WEB-CUSTOM',STAGE_WORKFLOW_ID].includes(task.WorkflowID));
         if (tasks.length && tasks.some((task)=>task.WorkflowID!==option.id)) return respond(res,409,{error:'This project already has a different workflow.'});
@@ -385,7 +451,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           const startDate = input.startDate || project.StartDate;
           if (!isoDate(startDate)) return respond(res,400,{error:'Enter a valid start date.'});
           const client = roster.find((member)=>/\bclient\b/i.test(member.AssignedRole));
-          if (project.Status !== 'Active' || project.StartDate !== startDate) await store.updateRow('Projects',project.rowNumber,{StartDate:startDate,Status:'Active',WebManaged:'Yes',ClientName:client.AssignedName,ClientTelegramID:String(client.TelegramUserID),Notes:'Blank plan started from the web app'});
+          if (project.Status !== 'Active' || project.StartDate !== startDate) await store.updateRow('Projects',project.rowNumber,{StartDate:startDate,Status:'Active',WebManaged:'Yes',ClientName:client.AssignedName,ClientTelegramID:String(client.TelegramUserID),ClientTelegramIDs:roster.filter(member=>hasRole(member.AssignedRole,'Client')).map(member=>member.TelegramUserID).join(','),Notes:'Blank plan started from the web app'});
           let announcementStatus = project.WorkflowAnnouncementStatus || '';
           if (!announcementStatus) {
             await store.updateRow('Projects',project.rowNumber,{WorkflowAnnouncementStatus:'Sending'});
@@ -441,7 +507,8 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           await store.updateRow('Projects', project.rowNumber, { WebManaged: 'Yes' });
           await sendMessage(token, groupChatId, `<b>Project created — ${escape(name)}</b>\n\nAdd the project members in Telegram, then assign their names and roles and choose the project type in the web app.`);
         }
-        await store.updateRow('Projects',project.rowNumber,{WebManaged:'Yes'});
+        const clients=(await store.rows('GroupMembers')).filter(member=>String(member.GroupChatID)===groupChatId && member.MembershipStatus==='Active' && hasRole(member.AssignedRole,'Client'));
+        await store.updateRow('Projects',project.rowNumber,{WebManaged:'Yes',ClientTelegramIDs:clients.map(member=>member.TelegramUserID).join(',')});
         return respond(res, 200, { projectId: project.ProjectID, projectName: project.ProjectName });
       }
       return respond(res, 404, { error: 'Not found.' });

@@ -62,7 +62,7 @@ export async function syncDecisionRequest(project, request) {
 
 // Capture ordinary text/media only from the workflow's explicitly assigned client.
 export function parseClientRequest(message, project, botUsername) {
-  if (!project?.ClientTelegramID || String(message.from?.id || '') !== String(project.ClientTelegramID) || message.from?.is_bot || !['group','supergroup'].includes(message.chat?.type)) return null;
+  if (!project || !String(project.ClientTelegramIDs || project.ClientTelegramID || '').split(',').includes(String(message.from?.id || '')) || message.from?.is_bot || !['group','supergroup'].includes(message.chat?.type)) return null;
   if (String(message.chat.id) !== String(project.GroupChatID)) return null;
   if ((message.text || message.caption || '').trim().startsWith('/')) return null;
   if (!(message.text || message.caption || message.photo || message.document || message.video || message.voice || message.audio)) return null;

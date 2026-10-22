@@ -1,3 +1,4 @@
+import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
 // Founder-built plans: a project is a list of stages, and every stage is the same six tasks run one after another.
 // The web app sends intent (add a stage, delay a task); this module turns it into Tasks rows and schedule moves.
 // Dates are calendar days in UTC, end dates inclusive, matching workflow-engine.js.
@@ -99,7 +100,7 @@ function assigneeFor(task, role, groupMembers) {
     if (!/^\d+$/.test(String(task.assigneeTelegramId))) throw new PlanError('Invalid task assignee.');
     return { id: String(task.assigneeTelegramId), name: String(task.assigneeName || '').slice(0, 100) };
   }
-  const matches = groupMembers.filter((member) => member.MembershipStatus === 'Active' && sameName(member.AssignedRole, role));
+  const matches = groupMembers.filter((member) => member.MembershipStatus === 'Active' && matchesRole(member.AssignedRole, role));
   return matches.length === 1 ? { id: String(matches[0].TelegramUserID), name: matches[0].AssignedName || matches[0].TelegramName || '' } : { id: '', name: '' };
 }
 
@@ -170,13 +171,21 @@ export function buildStageTasks(existingRows, spec, { projectId, groupMembers = 
   const tail = tailStage(existingRows);
   const type = placement.type || (tail ? 'after' : 'date');
   if (type === 'after' || type === 'parallel') {
-    const stage = placement.stageName ? findStage(existingRows, placement.stageName) : tail && { name: tail.name, rows: tail.rows };
-    if (!stage) throw new PlanError(`Stage "${placement.stageName}" was not found.`, 404);
-    const anchor = type === 'after' ? lastTaskOf(stage.rows) : stage.rows[0];
-    anchorEdge = `${anchor.TaskID}:${type === 'after' ? 'FS' : 'SS'}`;
-    const date = type === 'after' ? effectiveEnd(anchor) : effectiveStart(anchor);
-    start = date ? (type === 'after' ? addDays(parseDate(date), 1) : parseDate(date)) : null;
-    if (!start) warnings.push({ reason: `${stage.name} has no dates yet, so ${name} stays unscheduled until it does.` });
+    const references=Array.isArray(placement.predecessors)?placement.predecessors:[{stageName:placement.stageName || tail?.name,type:type==='parallel'?'SS':'FS'}];
+    if(!references.length || references.length>100)throw new PlanError('Choose between one and 100 predecessor stages.');
+    const edges=[],dates=[];
+    for(const reference of references){
+      if(!['FS','SS'].includes(reference.type))throw new PlanError('Choose after finish or start together.');
+      const stage=findStage(existingRows,reference.stageName);
+      if(!stage)throw new PlanError(`Stage "${reference.stageName}" was not found.`,404);
+      const anchor=reference.type==='SS'?stage.rows[0]:lastTaskOf(stage.rows);
+      edges.push(`${anchor.TaskID}:${reference.type}`);
+      const date=reference.type==='SS'?effectiveStart(anchor):effectiveEnd(anchor);
+      if(date)dates.push(reference.type==='SS'?parseDate(date):addDays(parseDate(date),1));
+    }
+    anchorEdge=[...new Set(edges)].join(',');
+    start=dates.length===references.length?new Date(Math.max(...dates.map(date=>date.getTime()))):null;
+    if(!start)warnings.push({reason:`A predecessor has no dates yet, so ${name} stays unscheduled until it does.`});
   } else if (type === 'date') {
     start = parseDate(placement.startDate || today);
     if (!start) throw new PlanError('Choose a real start date.');
@@ -218,7 +227,7 @@ export function buildStageTasks(existingRows, spec, { projectId, groupMembers = 
       ActualEnd: done ? taskEnd : '',
       PredecessorTaskID: predecessor.endsWith(':FS') ? predecessor.split(':')[0] : '',
       PredecessorTaskIDs: predecessor,
-      DependencyType: predecessor ? predecessor.split(':')[1] : '',
+      DependencyType: predecessor ? predecessor.split(',')[0].split(':')[1] : '',
       Audience: item.role === 'Client' ? 'client' : 'internal',
       Trade: name,
       BlockedReason: taskStart ? '' : 'Waiting on a predecessor without a confirmed duration',
