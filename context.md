@@ -14,3 +14,8 @@ Google sign-in is out of scope. Existing silent Telegram members need `/join` or
 - Bot draft PR: https://github.com/parashrautela/telegrambot/pull/17 (implementation head `92401e8`).
 - Both PRs report clean merge state. No production merge or deployment was made. Railway reports deployments paused during an upstream issue.
 - Next release action: deploy the bot, then the web, then perform the real Telegram acceptance checks. Google sign-in remains excluded.
+
+
+## 2026-10-24 — task shares and meeting notifications
+
+Added authenticated task-notice transport for the web communication/meeting release. It verifies active project recipients, sends safe text mentions and optional image/PDF uploads as multipart documents, uses bounded requests and reports partial failure without claiming delivery. Private Start registration now supports project participants for meeting notifications; digest staff behavior remains. 77 bot tests pass, including safe mentions, multipart files, departed recipients and partial failure. Production publication pending; release this bot before the companion web app. No real messages were sent during validation.

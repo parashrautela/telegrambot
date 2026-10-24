@@ -1,3 +1,4 @@
+import {sendTaskNotice} from './task-notice.js';
 import {planStageConnections,connectionFingerprint} from './stage-connections.js';
 import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
 import { refreshGroupMembers, activeMembership } from './group-discovery.js';
@@ -15,9 +16,9 @@ import { STAGE_WORKFLOW_ID, buildStagePlan, defaultPlanStages, insertStageTask, 
 const escape = (value) => String(value).replace(/[&<>]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[character]));
 const respond = (res, code, data) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(data)); };
 const equal = (a, b) => { const left = Buffer.from(String(a)); const right = Buffer.from(String(b)); return left.length === right.length && timingSafeEqual(left, right); };
-async function readBody(req) {
+async function readBody(req, maximum = 50_000) {
   let raw = '';
-  for await (const chunk of req) { raw += chunk; if (raw.length > 50_000) throw new Error('Request too large.'); }
+  for await (const chunk of req) { raw += chunk; if (raw.length > maximum) throw new Error('Request too large.'); }
   return JSON.parse(raw || '{}');
 }
 
@@ -72,6 +73,11 @@ export function startWebBridge({ store, token, founderTelegramId }) {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
       if (!equal((req.headers.authorization || '').replace(/^Bearer /i, ''), secret)) return respond(res, 401, { error: 'Integration authentication required.' });
+      if(req.method==='POST' && req.url==='/api/integrations/web/task-notice') {
+        const input=await readBody(req,7_100_000);
+        try { return respond(res,200,await sendTaskNotice({store,token,input})); }
+        catch(error) { return respond(res,error.status || 502,{error:error.status ? error.message : 'Notification delivery was not confirmed.'}); }
+      }
       if (req.method === 'POST' && req.url === '/api/integrations/web/projects/close') {
         const input = await readBody(req);
         if (!['Completed', 'Abandoned'].includes(input.outcome)) return respond(res, 400, { error: 'Choose Completed or Abandoned.' });

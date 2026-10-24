@@ -10,3 +10,8 @@ Implemented the non-Google-sign-in client-review backlog. See [implementation an
 - Navigation, validation and concise message/summary cleanup.
 - Validation: 84 web tests, 75 bot tests, production web build and bot syntax checks pass.
 - Release pending: Railway has paused deploys during an upstream outage. No new production release.
+
+
+## 2026-10-24 — task shares and meeting notifications
+
+Added authenticated task-notice transport for the web communication/meeting release. It verifies active project recipients, sends safe text mentions and optional image/PDF uploads as multipart documents, uses bounded requests and reports partial failure without claiming delivery. Private Start registration now supports project participants for meeting notifications; digest staff behavior remains. 77 bot tests pass, including safe mentions, multipart files, departed recipients and partial failure. Production publication pending; release this bot before the companion web app. No real messages were sent during validation.

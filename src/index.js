@@ -495,7 +495,7 @@ async function groupCommand(message) {
     try {
       const response=await fetch(`${base}/api/integrations/telegram/connect`,{method:'POST',headers:{'content-type':'application/json',authorization:`Bearer ${process.env.INTEGRATION_SHARED_SECRET}`},body:JSON.stringify({telegramUserId:String(message.from.id)}),signal:AbortSignal.timeout(10000)});
       const result=await response.json();
-      return sendMessage(config.groupToken,message.chat.id,response.ok?'Connected. Your morning task list will arrive here.':escape(result.error || 'Ask the founder to assign your profile first.'));
+      return sendMessage(config.groupToken,message.chat.id,response.ok?'Connected. Your morning task list and scheduled meeting reminders can arrive here.':escape(result.error || 'Ask the founder to assign your profile first.'));
     }catch{return sendMessage(config.groupToken,message.chat.id,'Could not connect just now. Please try /start again.');}
   }
   if (groupOnly(message.chat) && (command === '/start' || command === '/join')) {
