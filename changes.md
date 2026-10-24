@@ -15,3 +15,5 @@ Implemented the non-Google-sign-in client-review backlog. See [implementation an
 ## 2026-10-24 — task shares and meeting notifications
 
 Added authenticated task-notice transport for the web communication/meeting release. It verifies active project recipients, sends safe text mentions and optional image/PDF uploads as multipart documents, uses bounded requests and reports partial failure without claiming delivery. Private Start registration now supports project participants for meeting notifications; digest staff behavior remains. 77 bot tests pass, including safe mentions, multipart files, departed recipients and partial failure. Production publication pending; release this bot before the companion web app. No real messages were sent during validation.
+
+Published review: https://github.com/parashrautela/telegrambot/pull/18 (3f8c226). Companion web: https://github.com/parashrautela/workflow-managment-/pull/31. Both remain drafts; production is unchanged.
