@@ -4,7 +4,7 @@ import { recordMessageMembers, refreshGroupMembers } from './group-discovery.js'
 import {migrateTelegramGroup} from './group-migration.js';
 import { botConfig } from './config.js';
 import crypto from 'node:crypto';
-import { captureDecisionRequest, parseDecisionRequest, parseClientRequest, syncCapturedDecisionRequest, retryDecisionRequestSync } from './decision-requests.js';
+import { captureDecisionRequest, parseDecisionRequest, parseGroupRequest, syncCapturedDecisionRequest, retryDecisionRequestSync } from './decision-requests.js';
 import { aiEnabled, chatWithFounder, interpretFounderGroupMessage, interpretProjectUpdate } from './ai.js';
 import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
@@ -1021,11 +1021,12 @@ poll(config.groupToken, 'Project group bot', async (update) => {
     const project = await store.projectForGroup(String(update.message.chat.id));
     if (project && !['Completed','Abandoned'].includes(project.Status)) {
       const client = await store.groupMember(project.GroupChatID,update.message.from?.id);
-      const request = client?.MembershipStatus==='Active' && hasRole(client.AssignedRole,'Client') ? parseClientRequest(update.message, {...project,ClientTelegramIDs:String(client.TelegramUserID)}, groupBotProfile.username) : null;
+      const clientId = client?.MembershipStatus==='Active' && hasRole(client.AssignedRole,'Client') ? String(client.TelegramUserID) : '';
+      const request = parseGroupRequest(update.message, {...project,ClientTelegramID:clientId,ClientTelegramIDs:clientId}, groupBotProfile.username);
       if (request) {
         const result = await captureDecisionRequest(store, project, request);
         try { await syncCapturedDecisionRequest(store, project, result.request); }
-        catch { console.warn(`Client query saved; web sync pending: ${request.RequestID}`); }
+        catch { console.warn(`Group message saved; web sync pending: ${request.RequestID}`); }
       }
     }
   }
