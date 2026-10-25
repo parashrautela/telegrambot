@@ -139,6 +139,26 @@ test('web timeline moves are previewed, applied to the sheet, and protected agai
     assert.equal(stale.status, 409);
     assert.match(stale.body.error, /changed since you opened it/);
 
+    const independent={taskId:'P001-T2',fromStart:'2026-03-06',fromEnd:'2026-03-09',start:'2026-03-04',end:'2026-03-07'};
+    const chosen=await post('/api/integrations/web/schedule/preview',{groupChatId:'-456',moves:[independent],mode:'parallel'});
+    assert.equal(chosen.status,200);
+    assert.equal(chosen.body.dependencyChanges.length,1);
+    const batchBefore=batches;
+    const missingGuard=await post('/api/integrations/web/schedule/apply',{groupChatId:'-456',moves:[independent],mode:'parallel'});
+    assert.equal(missingGuard.status,409);
+    tasks[0].ForecastEnd='2026-03-06';
+    const changed=await post('/api/integrations/web/schedule/apply',{groupChatId:'-456',moves:[independent],mode:'parallel',fingerprint:chosen.body.fingerprint});
+    assert.equal(changed.status,409);
+    assert.equal(batches,batchBefore);
+    tasks[0].ForecastEnd='2026-03-05';
+    const saved=await post('/api/integrations/web/schedule/apply',{groupChatId:'-456',moves:[independent],mode:'parallel',fingerprint:chosen.body.fingerprint});
+    assert.equal(saved.status,200);
+    assert.equal(tasks[1].PredecessorTaskIDs,'');
+    assert.equal(tasks[1].PredecessorTaskID,'');
+    assert.equal(tasks[1].CurrentStart,'2026-03-04');
+    // Restore the fixture for the existing deadline-edit checks below.
+    Object.assign(tasks[1],{ForecastStart:'2026-03-06',ForecastEnd:'2026-03-09',CurrentStart:'',CurrentEnd:'',PredecessorTaskIDs:'P001-T1:FS'});
+
     const sync = await post('/api/integrations/web/tasks/sync', { groupChatId: '-456', updates: [{ taskId: 'P001-T1', title: 'Drawings', stage: 'Design', status: 'Pending', deadline: '2026-03-06', assigneeTelegramId: '', assigneeName: '' }] });
     assert.equal(sync.status, 200);
     assert.deepEqual([tasks[0].ForecastEnd, tasks[0].PlannedEnd, tasks[1].ForecastStart], ['2026-03-06', '2026-03-03', '2026-03-07'], 'deadline edit reschedules and keeps baseline');
