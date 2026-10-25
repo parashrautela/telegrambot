@@ -49,6 +49,12 @@ async function writeSchedule(store, project, rows, result, { actor, actorName, s
     if (item.committed && !row.PlannedStart && !row.PlannedEnd) Object.assign(changes, { PlannedStart: item.forecastStart, PlannedEnd: item.forecastEnd });
     return { rowNumber: row.rowNumber, changes };
   });
+  for(const change of result.dependencyChanges || []){
+    const row=byId.get(change.taskId);
+    let update=rowChanges.find(item=>item.rowNumber===row.rowNumber);
+    if(!update){update={rowNumber:row.rowNumber,changes:{LastUpdatedAt:stamp,LastUpdatedBy:String(actor)}};rowChanges.push(update);}
+    Object.assign(update.changes,{PredecessorTaskIDs:change.dependencies.map(edge=>`${edge.id}:${edge.type}`).join(','),PredecessorTaskID:change.dependencies.find(edge=>edge.type==='FS')?.id || ''});
+  }
   await store.updateRows('Tasks', rowChanges);
   if (result.finish && result.finish !== project.TargetEndDate) await store.updateRow('Projects', project.rowNumber, { TargetEndDate: result.finish });
   const moved = result.affected.filter((item) => item.committed);
@@ -174,8 +180,10 @@ export function startWebBridge({ store, token, founderTelegramId }) {
             return row && ((move.fromStart !== undefined && move.fromStart !== effectiveStart(row)) || (move.fromEnd !== undefined && move.fromEnd !== effectiveEnd(row)));
           });
           if (stale.length) return respond(res, 409, { error: 'The schedule changed since you opened it. Refresh and try again.', stale: stale.map((move) => move.taskId) });
-          const result = rescheduleTasks(rows, moves);
-          const summary = { ok: result.ok, conflicts: result.conflicts, warnings: result.warnings, affected: result.affected, finish: result.finish };
+          const mode=input.mode || 'keep';
+          const result = rescheduleTasks(rows, moves, {mode});
+          if(apply && mode!=='keep' && input.fingerprint!==result.fingerprint)return respond(res,409,{error:'The schedule changed. Preview this move again.'});
+          const summary = { mode, fingerprint:result.fingerprint, dependencyChanges:result.dependencyChanges || [], ok: result.ok, conflicts: result.conflicts, warnings: result.warnings, affected: result.affected, finish: result.finish };
           if (!apply) return respond(res, 200, summary);
           if (!result.ok) return respond(res, 409, { ...summary, error: result.conflicts[0].reason });
           const actorName = String(input.actorName || 'Founder').slice(0, 100);

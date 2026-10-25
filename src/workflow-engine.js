@@ -2,6 +2,7 @@
 // Calendar-day math runs only when a duration is supplied. Unconfirmed durations stay unscheduled.
 // Delay updates forecast dates for tasks that have not started. Planned and current dates stay as committed.
 
+import { planMoveMode } from './schedule-move-modes.js';
 import { TRADE_ORDER, residentialInteriorDefinitions } from './residential-interior.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -356,7 +357,17 @@ export function forecastDelayImpact(tasks, delayedTaskId, delayDays) {
 
 // Founder moves from the web timeline: drag, resize or swap. Each move sets a task's new start and end.
 // Moved tasks must still respect their own predecessors. Successors are pushed later when needed, never pulled earlier.
-export function rescheduleTasks(tasks, moves, { enforce = true } = {}) {
+export function rescheduleTasks(tasks, moves, { enforce = true, mode='keep' } = {}) {
+  if(mode!=='keep'){
+    const active=withForecastDefaults(tasks).filter(task=>!CLOSED_STATUS.test(task.Status || ''));
+    const normalized=active.map(task=>({id:task.TaskID,title:task.TaskName,sequence:task.Sequence,start:task.ForecastStart,end:task.ForecastEnd,status:task.Status,actualStart:task.ActualStart || '',dependencies:dependencyEdges(task)}));
+    const result=planMoveMode(normalized,moves,mode);
+    const moved=new Map(result.tasks.map(task=>[task.id,task]));
+    return {...result,mode,tasks:withForecastDefaults(tasks).map(task=>{
+      const row=moved.get(task.TaskID);if(!row)return task;
+      return {...task,ForecastStart:row.start,ForecastEnd:row.end,PredecessorTaskIDs:row.dependencies.map(edge=>`${edge.id}:${edge.type}`).join(','),PredecessorTaskID:row.dependencies.find(edge=>edge.type==='FS')?.id || ''};
+    })};
+  }
   const copies = withForecastDefaults(tasks);
   const byId = new Map(copies.map((task) => [task.TaskID, task]));
   const before = new Map(copies.map((task) => [task.TaskID, { start: task.ForecastStart, end: task.ForecastEnd }]));

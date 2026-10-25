@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { forecastDelayImpact, parseDependencyField, parseUserDate, projectedFinish, scheduleDefinitions, withForecastDefaults, completionBlockReason } from './workflow-engine.js';
+import { rescheduleTasks, forecastDelayImpact, parseDependencyField, parseUserDate, projectedFinish, scheduleDefinitions, withForecastDefaults, completionBlockReason } from './workflow-engine.js';
 import { SheetStore } from './sheets.js';
 
 const task = (TaskID, ForecastStart, ForecastEnd, PredecessorTaskIDs = '', Status = 'Pending') => ({ TaskID, TaskName: TaskID, ForecastStart, ForecastEnd, PredecessorTaskIDs, Status, TemplateVersion: 'T' });
@@ -293,4 +293,20 @@ test('appendRows sends every row in a single values:append request', async () =>
   assert.equal(calls.length, 1);
   assert.match(calls[0].path, /:append\?valueInputOption=RAW&insertDataOption=INSERT_ROWS$/);
   assert.deepEqual(calls[0].body.values, [['1', 'A', '', ''], ['2', 'B', '', 'Yes']]);
+});
+
+
+test('explicit moves update sheet dependencies while keeping planned dates',()=>{
+ const tasks=chain();tasks.forEach((row,i)=>{row.Sequence=String((i+1)*10);row.PlannedStart=row.ForecastStart;row.PlannedEnd=row.ForecastEnd;});
+ const move={taskId:'B',fromStart:'2026-03-04',fromEnd:'2026-03-05',start:'2026-03-02',end:'2026-03-03'};
+ const parallel=rescheduleTasks(tasks,[move],{mode:'parallel'});
+ assert.equal(byId(parallel).B.PredecessorTaskIDs,'');
+ assert.equal(byId(parallel).C.PredecessorTaskIDs,'');
+ assert.equal(byId(parallel).B.PlannedStart,'2026-03-04');
+ assert.equal(byId(parallel).C.ForecastStart,'2026-03-06');
+ const cascade=rescheduleTasks(tasks,[move],{mode:'shift-following'});
+ assert.equal(byId(cascade).C.ForecastStart,'2026-03-04');
+ assert.equal(byId(cascade).C.PredecessorTaskIDs,'B:FS');
+ assert.equal(byId(cascade).B.PredecessorTaskID,'');
+ assert.equal(tasks[1].PredecessorTaskIDs,'A:FS');
 });
