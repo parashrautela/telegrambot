@@ -1012,8 +1012,7 @@ poll(config.groupToken, 'Project group bot', async (update) => {
         await sendMessage(config.groupToken, update.message.chat.id, `Saved request <code>${escape(request.RequestID)}</code> in the bot, but the web app has not received it. Retry the same command later.`);
         return;
       }
-      await sendMessage(config.groupToken, update.message.chat.id,
-        `${sync.configured ? (result.created ? 'Saved for review' : 'Already tracked') : 'Saved in bot only'} — <b>${escape(project.ProjectName)}</b>\n${escape(result.request.RequestType)} · ${escape(sync.status || result.request.Status)}${sync.configured ? '' : '\nWeb app sync is not configured yet.'}\nReference: <code>${escape(result.request.RequestID)}</code>`);
+      if (!sync.configured) console.warn(`Query ${request.RequestID} saved locally; web sync is not configured.`);
       return;
     }
   }

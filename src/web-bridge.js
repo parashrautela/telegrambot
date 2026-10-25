@@ -1,3 +1,4 @@
+import { notifyQuery } from "./query-notifications.js";
 import {planStageConnections,connectionFingerprint} from './stage-connections.js';
 import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
 import { refreshGroupMembers, activeMembership } from './group-discovery.js';
@@ -288,10 +289,11 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
         } finally { if (apply) startingProjects.delete(lockKey); }
       }
-      if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/publish'].includes(req.url)) {
+      if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/publish','/api/integrations/web/decisions/notify'].includes(req.url)) {
         const input = await readBody(req);
         const request = (await store.rows('DecisionRequests')).find(row => row.RequestID === input.requestId && String(row.GroupChatID) === String(input.groupChatId));
         if (!request) return respond(res,404,{error:'Request not found in the linked group.'});
+        if (req.url.endsWith('/notify')) return respond(res,200,await notifyQuery({ store, request, input, token }));
         if (req.url.endsWith('/content')) {
           const attachments = JSON.parse(request.AttachmentsJSON || '[]');
           if (!Number.isInteger(input.attachmentIndex) || input.attachmentIndex < 0 || !attachments[input.attachmentIndex]) return respond(res,404,{error:'Attachment not found.'});
