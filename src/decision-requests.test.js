@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureDecisionRequest, parseDecisionRequest, parseClientRequest, retryDecisionRequestSync } from './decision-requests.js';
+import { captureDecisionRequest, parseDecisionRequest, parseClientRequest, parseGroupRequest, retryDecisionRequestSync } from './decision-requests.js';
 
 const message = { chat: { id: -123, type: 'supergroup' }, message_id: 10, date: 1700000000, from: { id: 1, first_name: 'Lead' }, text: '/approval Buy these lights?' };
 test('direct request and bot targeting', () => {
@@ -92,4 +92,22 @@ test('automatic client messages accept every current client and reject other peo
  const project={GroupChatID:'-123',ClientTelegramID:'42',ClientTelegramIDs:'42,43'};
  for(const id of [42,43])assert.ok(parseClientRequest({...message,from:{id,first_name:'Client'},text:'Please review the drawing'},project,'our_bot'));
  assert.equal(parseClientRequest({...message,from:{id:44},text:'Other conversation'},project,'our_bot'),null);
+});
+
+
+test('group capture keeps staff and unassigned senders as context and active clients as queries', () => {
+  const project = {ProjectID:'P001',GroupChatID:'-123',ClientTelegramIDs:'42,43'};
+  const staff = {...message,text:'Materials arrived'};
+  const context = parseGroupRequest(staff,project,'our_bot');
+  assert.equal(context.RequestType,'Message');
+  assert.equal(context.RequestID,'REQ--123-10-message');
+  assert.equal(context.OriginalMessage,'Materials arrived');
+  assert.equal(context.AutomaticClientQuery,undefined);
+  for (const id of [42,43]) assert.equal(parseGroupRequest({...staff,from:{id}},project,'our_bot').AutomaticClientQuery,'Yes');
+  assert.equal(parseGroupRequest({...staff,from:{id:42}},{...project,ClientTelegramIDs:'',ClientTelegramID:''},'our_bot').RequestType,'Message');
+  assert.equal(parseGroupRequest({...staff,from:{id:1,is_bot:true}},project,'our_bot'),null);
+  assert.equal(parseGroupRequest(message,project,'our_bot'),null);
+  assert.equal(parseGroupRequest({...staff,chat:{id:-456,type:'supergroup'}},project,'our_bot'),null);
+  const photo = parseGroupRequest({...staff,text:undefined,photo:[{file_id:'small'},{file_id:'large'}]},project,'our_bot');
+  assert.equal(JSON.parse(photo.AttachmentsJSON)[0].fileId,'large');
 });

@@ -69,6 +69,18 @@ export function parseClientRequest(message, project, botUsername) {
   return { ...parseDecisionRequest({ ...message, text: '/question', reply_to_message: message }, botUsername), AutomaticClientQuery: 'Yes' };
 }
 
+// Client messages are queries; other human messages provide project context.
+export function parseGroupRequest(message, project, botUsername) {
+  if (!project || message.from?.is_bot || !['group','supergroup'].includes(message.chat?.type)) return null;
+  if (String(message.chat.id) !== String(project.GroupChatID)) return null;
+  if ((message.text || message.caption || '').trim().startsWith('/')) return null;
+  if (!(message.text || message.caption || message.photo || message.document || message.video || message.voice || message.audio)) return null;
+  const clientRequest = parseClientRequest(message, project, botUsername);
+  if (clientRequest) return clientRequest;
+  const request = parseDecisionRequest({ ...message, text: '/question', reply_to_message: message }, botUsername);
+  return { ...request, RequestID: `REQ-${message.chat.id}-${message.message_id}-message`, RequestType: 'Message' };
+}
+
 const syncing = new Set();
 export async function syncCapturedDecisionRequest(store, project, request) {
   if (syncing.has(request.RequestID)) return { configured: true, status: request.Status };
