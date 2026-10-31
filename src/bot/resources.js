@@ -1,4 +1,6 @@
 import { sendPhoto, sendDocument, sendMessage } from '../integrations/telegram.js';
+import { archiveProjectResource } from '../integrations/drive-storage.js';
+import { retryProjectResources } from '../integrations/project-resources.js';
 import { escape, groupOnly, actor } from './message-utils.js';
 
 export function createResourceHandlers({ config, store }) {
@@ -38,41 +40,42 @@ export function createResourceHandlers({ config, store }) {
     const project = await store.projectForGroup(message.chat.id);
     if (!project || ['Completed', 'Abandoned'].includes(project.Status)) return;
     const user = actor(message.from);
-    const knownUser = await store.user(message.from.id);
+    const roster = await store.groupMember(message.chat.id, message.from.id);
     const maySubmit =
       String(message.from.id) === config.founderTelegramId ||
-      /\bclient\b/i.test(knownUser?.Role || '');
+      (roster?.MembershipStatus === 'Active' && Boolean(roster.AssignedRole));
     if (!maySubmit) return;
     const task = (await store.tasksForProject(project.ProjectID)).find(
       (item) => item.Stage === 'Resources' && item.Status !== 'Completed',
     );
-    if (!task) return;
     const document = message.document;
     const photo = message.photo?.at(-1);
     const resourceType = document ? 'Document' : 'Photo';
     const fileId = document?.file_id || photo?.file_id;
-    const fileName = document?.file_name || `photo-${message.message_id}`;
-    await store.saveSubmittedResource({
+    const fileName = (document?.file_name || `photo-${message.message_id}.jpg`).slice(0, 200);
+    const submission = await store.saveSubmittedResource({
       projectId: project.ProjectID,
-      taskId: task.TaskID,
+      taskId: task?.TaskID || '',
       groupChatId: message.chat.id,
       user,
       resourceType,
       fileId,
       fileName,
       caption: message.caption || '',
+      sourceMessageId: message.message_id,
+      mimeType: document?.mime_type || 'image/jpeg',
     });
-    await store.updateRow('Tasks', task.rowNumber, {
-      Status: 'Resources received — Review needed',
-      LastUpdatedAt: new Date().toISOString(),
-      LastUpdatedBy: String(user.id),
-    });
+    if (!submission.created) return;
+    if (task)
+      await store.updateRow('Tasks', task.rowNumber, {
+        Status: 'Resources received — Review needed',
+        LastUpdatedAt: new Date().toISOString(),
+        LastUpdatedBy: String(user.id),
+      });
     await store.audit({
       projectId: project.ProjectID,
-      taskId: task.TaskID,
+      taskId: task?.TaskID || '',
       action: 'Project resource submitted',
-      oldValue: task.Status,
-      newValue: 'Resources received — Review needed',
       actor: user.id,
       actorName: user.name,
       source: 'Telegram group bot',
@@ -81,13 +84,12 @@ export function createResourceHandlers({ config, store }) {
     await sendMessage(
       config.groupToken,
       message.chat.id,
-      `✅ Thanks ${escape(user.name)} — I logged this ${resourceType.toLowerCase()} under the project resources. The founder can review it before moving to the next step.`,
+      `✅ ${escape(fileName)} is logged for this project and queued for automatic Google Drive storage. Check Files in the web app for its save status.`,
     );
-    return sendMessage(
-      config.leaderToken,
-      project.LeaderTelegramID || config.founderTelegramId,
-      `📎 <b>Project resource received</b>\n\nProject: ${escape(project.ProjectName)}\nFrom: ${escape(user.name)}\nFile: ${escape(fileName)}\n\nThe Resources task is ready for your review.`,
+    retryProjectResources(store, archiveProjectResource).catch(() =>
+      console.warn('Project file storage retry pending.'),
     );
   }
+
   return { shareWorkflowResources, requestClientResources, handleProjectResourceUpload };
 }

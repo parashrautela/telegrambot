@@ -96,10 +96,7 @@ export function createMembershipHandlers({ config, leaderBotProfile, projectTldr
     await sendMessage(
       config.groupToken,
       change.chat.id,
-      `Welcome <b>${escape(memberName)}</b> 👋\n\nI’m setting up your project profile. Meanwhile, here is where the project stands:\n\n${await projectTldr(project)}\n\nThe founder will confirm your role shortly.`,
-      process.env.WEB_APP_URL
-        ? undefined
-        : { inline_keyboard: [[{ text: 'Set up my profile', url: profileLink }]] },
+      `Welcome <b>${escape(memberName)}</b>. Your role will be assigned shortly.`,
     );
     if (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET) return;
     return sendMessage(

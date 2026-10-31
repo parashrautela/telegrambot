@@ -2,6 +2,7 @@
 // Calendar-day math runs only when a duration is supplied. Unconfirmed durations stay unscheduled.
 // Delay updates forecast dates for tasks that have not started. Planned and current dates stay as committed.
 
+import { planMoveMode } from './schedule-move-modes.js';
 import { TRADE_ORDER, residentialInteriorDefinitions } from './residential-interior.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -16,6 +17,13 @@ const parseDate = (value) => {
   return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? null : date;
 };
 const formatDate = (date) => (date ? date.toISOString().slice(0, 10) : '');
+const readableDate = (date) =>
+  date.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
 const addDays = (date, days) => new Date(date.getTime() + days * DAY_MS);
 const daySpan = (start, end) => Math.round((end.getTime() - start.getTime()) / DAY_MS);
 
@@ -423,6 +431,175 @@ export function forecastDelayImpact(tasks, delayedTaskId, delayDays) {
   }
 
   return { tasks: copies, affected };
+}
+
+// Founder moves from the web timeline: drag, resize or swap. Each move sets a task's new start and end.
+// Moved tasks must still respect their own predecessors. Successors are pushed later when needed, never pulled earlier.
+export function rescheduleTasks(tasks, moves, { enforce = true, mode = 'keep' } = {}) {
+  if (mode !== 'keep') {
+    const active = withForecastDefaults(tasks).filter(
+      (task) => !CLOSED_STATUS.test(task.Status || ''),
+    );
+    const normalized = active.map((task) => ({
+      id: task.TaskID,
+      title: task.TaskName,
+      sequence: task.Sequence,
+      start: task.ForecastStart,
+      end: task.ForecastEnd,
+      status: task.Status,
+      actualStart: task.ActualStart || '',
+      dependencies: dependencyEdges(task),
+    }));
+    const result = planMoveMode(normalized, moves, mode);
+    const moved = new Map(result.tasks.map((task) => [task.id, task]));
+    return {
+      ...result,
+      mode,
+      tasks: withForecastDefaults(tasks).map((task) => {
+        const row = moved.get(task.TaskID);
+        if (!row) return task;
+        return {
+          ...task,
+          ForecastStart: row.start,
+          ForecastEnd: row.end,
+          PredecessorTaskIDs: row.dependencies.map((edge) => `${edge.id}:${edge.type}`).join(','),
+          PredecessorTaskID: row.dependencies.find((edge) => edge.type === 'FS')?.id || '',
+        };
+      }),
+    };
+  }
+  const copies = withForecastDefaults(tasks);
+  const byId = new Map(copies.map((task) => [task.TaskID, task]));
+  const before = new Map(
+    copies.map((task) => [task.TaskID, { start: task.ForecastStart, end: task.ForecastEnd }]),
+  );
+  const conflicts = [];
+  const movedIds = new Set();
+  // forecastOnly moves (used by undo) restore a pushed successor without making it a committed plan change.
+  const committedIds = new Set(
+    moves.filter((move) => !move.forecastOnly).map((move) => move.taskId),
+  );
+  for (const move of moves) {
+    const task = byId.get(move.taskId);
+    const start = parseDate(move.start);
+    const end = parseDate(move.end);
+    if (!task) {
+      conflicts.push({ taskId: move.taskId, reason: 'Task not found.' });
+      continue;
+    }
+    if (!start || !end || end < start) {
+      conflicts.push({
+        taskId: task.TaskID,
+        taskName: task.TaskName,
+        reason: 'Choose a start on or before the end.',
+      });
+      continue;
+    }
+    if (enforce && (task.Status === 'Completed' || CLOSED_STATUS.test(task.Status || ''))) {
+      conflicts.push({
+        taskId: task.TaskID,
+        taskName: task.TaskName,
+        reason: `${task.TaskName} is ${task.Status} and cannot be moved.`,
+      });
+      continue;
+    }
+    task.ForecastStart = formatDate(start);
+    task.ForecastEnd = formatDate(end);
+    movedIds.add(task.TaskID);
+  }
+  if (enforce) {
+    for (const taskId of movedIds) {
+      const task = byId.get(taskId);
+      for (const edge of dependencyEdges(task)) {
+        const predecessor = byId.get(edge.id);
+        if (!predecessor || CLOSED_STATUS.test(predecessor.Status || '')) continue;
+        const anchorDate =
+          edge.type === 'SS'
+            ? parseDate(predecessor.ForecastStart)
+            : parseDate(predecessor.ForecastEnd) && addDays(parseDate(predecessor.ForecastEnd), 1);
+        if (anchorDate && parseDate(task.ForecastStart) < anchorDate) {
+          conflicts.push({
+            taskId,
+            taskName: task.TaskName,
+            reason: `${task.TaskName} cannot start before ${readableDate(anchorDate)}: it waits for ${predecessor.TaskName} to ${edge.type === 'SS' ? 'start' : 'finish'}.`,
+          });
+        }
+      }
+    }
+  }
+  const warnings = [];
+  if (!conflicts.length) {
+    const ordered = topologicalOrder(copies, byId);
+    for (const taskId of ordered) {
+      if (movedIds.has(taskId)) continue;
+      const task = byId.get(taskId);
+      const start = parseDate(task.ForecastStart);
+      const end = parseDate(task.ForecastEnd);
+      if (!start || !end) continue;
+      const anchors = dependencyEdges(task)
+        .map((edge) => {
+          const predecessor = byId.get(edge.id);
+          if (!predecessor) return null;
+          return edge.type === 'SS'
+            ? parseDate(predecessor.ForecastStart)
+            : parseDate(predecessor.ForecastEnd) && addDays(parseDate(predecessor.ForecastEnd), 1);
+        })
+        .filter(Boolean);
+      const earliest = anchors.reduce((latest, date) => (date > latest ? date : latest), start);
+      if (earliest <= start) continue;
+      if (isStarted(task)) {
+        warnings.push({
+          taskId,
+          taskName: task.TaskName,
+          reason: `${task.TaskName} has already started, so it was not moved. It now overlaps work it depends on.`,
+        });
+        continue;
+      }
+      const span = daySpan(start, end);
+      task.ForecastStart = formatDate(earliest);
+      task.ForecastEnd = formatDate(addDays(earliest, span));
+    }
+  }
+  const affected = conflicts.length
+    ? []
+    : copies
+        .filter((task) => {
+          const previous = before.get(task.TaskID);
+          return previous.start !== task.ForecastStart || previous.end !== task.ForecastEnd;
+        })
+        .map((task) => ({
+          taskId: task.TaskID,
+          taskName: task.TaskName,
+          moved: movedIds.has(task.TaskID),
+          committed: committedIds.has(task.TaskID),
+          previousStart: before.get(task.TaskID).start,
+          previousEnd: before.get(task.TaskID).end,
+          forecastStart: task.ForecastStart,
+          forecastEnd: task.ForecastEnd,
+        }));
+  return {
+    ok: !conflicts.length,
+    conflicts,
+    warnings,
+    affected,
+    tasks: copies,
+    finish: conflicts.length ? '' : projectedFinish(copies),
+  };
+}
+
+function topologicalOrder(tasks, byId) {
+  const ordered = [];
+  const state = new Map();
+  const visit = (taskId) => {
+    if (state.get(taskId) === 'done') return;
+    if (state.get(taskId) === 'visiting') throw new Error(`Dependency cycle at ${taskId}`);
+    state.set(taskId, 'visiting');
+    for (const edge of dependencyEdges(byId.get(taskId))) if (byId.has(edge.id)) visit(edge.id);
+    state.set(taskId, 'done');
+    ordered.push(taskId);
+  };
+  for (const task of tasks) visit(task.TaskID);
+  return ordered;
 }
 
 export function procurementRisks(tasks) {

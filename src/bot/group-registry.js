@@ -1,5 +1,5 @@
-import { getChatAdministrators } from '../integrations/telegram.js';
-import { recordMessageMembers } from '../bot/group-discovery.js';
+import { recordMessageMembers, refreshGroupMembers } from './group-discovery.js';
+import { migrateTelegramGroup } from './group-migration.js';
 import { groupOnly, joinedStatus } from './message-utils.js';
 
 export function createGroupRegistry({ config, groupBotProfile, store }) {
@@ -9,8 +9,7 @@ export function createGroupRegistry({ config, groupBotProfile, store }) {
     await store.registerGroup(chat.id, chat.title || 'Unnamed Telegram group');
     observedGroups.add(String(chat.id));
     try {
-      const admins = await getChatAdministrators(config.groupToken, chat.id);
-      for (const admin of admins) await store.upsertGroupMember(chat.id, admin.user, 'Active');
+      await refreshGroupMembers({ store, token: config.groupToken, groupChatId: String(chat.id) });
     } catch (error) {
       console.warn('Could not read group administrators:', error.message);
     }
@@ -33,11 +32,23 @@ export function createGroupRegistry({ config, groupBotProfile, store }) {
   async function recordGroupMember(chat, member, status) {
     if (!groupOnly(chat) || !member || member.is_bot) return;
     await observeGroup(chat);
-    await store.upsertGroupMember(chat.id, member, status);
+    const changed = await store.upsertGroupMember(chat.id, member, status);
+    if (changed === false) return;
     await syncGroupRoster().catch((error) => console.warn(error.message));
   }
 
   async function discoverGroup(update) {
+    const migration = update.message;
+    if (migration?.migrate_to_chat_id || migration?.migrate_from_chat_id) {
+      const from = migration.migrate_from_chat_id || migration.chat.id;
+      const to = migration.migrate_to_chat_id || migration.chat.id;
+      await migrateTelegramGroup(store, from, to, migration.chat.title);
+      observedGroups.add(String(from));
+      observedGroups.delete(String(to));
+      await observeGroup({ id: to, type: 'supergroup', title: migration.chat.title });
+      await syncGroupRoster();
+      return;
+    }
     const change = update.my_chat_member;
     if (
       change &&

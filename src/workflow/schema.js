@@ -1,4 +1,5 @@
 import { residentialInteriorTuples } from './residential-interior.js';
+import { interiorSheetTuples } from './interior-sheet-plan.js';
 
 export const SHEETS = {
   DecisionRequests: [
@@ -25,6 +26,8 @@ export const SHEETS = {
     'AutomaticClientQuery',
     'WebSyncStatus',
     'WebSyncedAt',
+    'ReplyDeliveryStatus',
+    'StatusNoticesJSON',
   ],
   Projects: [
     'ProjectID',
@@ -38,6 +41,9 @@ export const SHEETS = {
     'TargetEndDate',
     'Notes',
     'ClientTelegramID',
+    'WebManaged',
+    'WorkflowAnnouncementStatus',
+    'ClientTelegramIDs',
   ],
   WorkflowTemplates: [
     'WorkflowID',
@@ -131,8 +137,16 @@ export const SHEETS = {
     'FileName',
     'Caption',
     'SubmittedAt',
+    'SourceMessageID',
+    'MimeType',
+    'WebSyncStatus',
+    'WebSyncedAt',
+    'DriveStatus',
+    'DriveFileID',
+    'DriveUrl',
+    'DriveError',
   ],
-  GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status'],
+  GroupRegistry: ['GroupChatID', 'GroupTitle', 'RegisteredAt', 'Status', 'MigratedTo'],
   GroupMembers: [
     'GroupChatID',
     'TelegramUserID',
@@ -635,6 +649,7 @@ export const WORKFLOWS = {
   'PAINTING-V1': PAINTING_WORKFLOW,
   'INTERIOR-V1': INTERIOR_WORKFLOW,
   'RESIDENTIAL-INTERIOR-V1': residentialInteriorTuples(),
+  'INTERIOR-SHEET-V1': interiorSheetTuples(),
 };
 
 export function templateRecord(step) {
@@ -676,7 +691,16 @@ export function templateRecord(step) {
   };
 }
 
+export const BLANK_WORKFLOW_ID = 'BLANK-V1';
+
 export const WORKFLOW_OPTIONS = [
+  // Web only: it has no template rows, the founder adds stages from the web timeline.
+  {
+    id: BLANK_WORKFLOW_ID,
+    label: 'Blank project',
+    description: 'Start empty and add stages as the project goes',
+    webOnly: true,
+  },
   { id: 'HOUSE-V1', label: 'New home / construction', description: 'Full house-building workflow' },
   {
     id: 'RESTORATION-V1',
@@ -693,5 +717,13 @@ export const WORKFLOW_OPTIONS = [
     id: 'RESIDENTIAL-INTERIOR-V1',
     label: 'Residential interior (parallel)',
     description: 'Design first, then overlapping trades with approval and material gates',
+    parallel: true,
+  },
+  {
+    id: 'INTERIOR-SHEET-V1',
+    label: 'Interior (founders’ sheet plan)',
+    description:
+      'The full INTERIOR 1 plan from the Google Sheet: design, every trade, parallel drawings and selections',
+    parallel: true,
   },
 ];

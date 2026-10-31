@@ -1,6 +1,15 @@
 import { botConfig } from '../config/environment.js';
 import { SheetStore } from '../storage/sheets.js';
-import { getMe, poll, sendMessage } from '../integrations/telegram.js';
+import {
+  GROUP_COMMANDS,
+  getMe,
+  poll,
+  sendMessage,
+  setMyCommands,
+} from '../integrations/telegram.js';
+import { archiveProjectResource } from '../integrations/drive-storage.js';
+import { retryProjectResources } from '../integrations/project-resources.js';
+import { hasRole } from '../projects/roles.js';
 import {
   parseDecisionRequest,
   captureDecisionRequest,
@@ -26,6 +35,10 @@ export async function startBot() {
   const groupBotProfile = await getMe(config.groupToken);
   const leaderBotProfile = await getMe(config.leaderToken);
   const groupBotMention = `@${groupBotProfile.username}`.toLowerCase();
+  // A failed menu update must never stop the bot; the commands still work when typed.
+  await setMyCommands(config.groupToken, GROUP_COMMANDS, { type: 'all_group_chats' }).catch(
+    (error) => console.warn('Could not set the group command menu:', error.message),
+  );
   const { syncGroupRoster, recordGroupMember, discoverGroup } = createGroupRegistry({
     config,
     groupBotProfile,
@@ -53,8 +66,6 @@ export async function startBot() {
   } = createMembershipHandlers({ config, leaderBotProfile, projectTldr, store });
   const { shareWorkflowResources, requestClientResources, handleProjectResourceUpload } =
     createResourceHandlers({ config, store });
-  const { requireProject, interpretNaturalLanguage, groupCommand, groupCallback } =
-    createGroupHandlers({ config, recordGroupMember, store });
   const { leaderCommand, leaderNaturalLanguageReply, leaderCallback } = createFounderHandlers({
     askFounderForPlan,
     changeRoleByName,
@@ -71,6 +82,8 @@ export async function startBot() {
     showProjects,
     store,
   });
+  const { requireProject, interpretNaturalLanguage, groupCommand, groupCallback } =
+    createGroupHandlers({ config, leaderCallback, recordGroupMember, store });
 
   console.log(`Project group bot connected as @${groupBotProfile.username}.`);
   console.log(
@@ -81,6 +94,7 @@ export async function startBot() {
   await recoverFounderDepartureAlerts();
   poll(config.groupToken, 'Project group bot', async (update) => {
     await discoverGroup(update);
+    if (update.message) await handleProjectResourceUpload(update.message);
     if (update.message) {
       let request;
       try {
@@ -113,7 +127,16 @@ export async function startBot() {
     if (update.message && groupOnly(update.message.chat)) {
       const project = await store.projectForGroup(String(update.message.chat.id));
       if (project && !['Completed', 'Abandoned'].includes(project.Status)) {
-        const request = parseGroupRequest(update.message, project, groupBotProfile.username);
+        const client = await store.groupMember(project.GroupChatID, update.message.from?.id);
+        const clientId =
+          client?.MembershipStatus === 'Active' && hasRole(client.AssignedRole, 'Client')
+            ? String(client.TelegramUserID)
+            : '';
+        const request = parseGroupRequest(
+          update.message,
+          { ...project, ClientTelegramID: clientId, ClientTelegramIDs: clientId },
+          groupBotProfile.username,
+        );
         if (request) {
           const result = await captureDecisionRequest(store, project, request);
           try {
@@ -124,7 +147,6 @@ export async function startBot() {
         }
       }
     }
-    if (update.message) await handleProjectResourceUpload(update.message);
     if (update.message?.text) {
       const mentioned = update.message.text.toLowerCase().includes(groupBotMention);
       console.log(
@@ -156,12 +178,7 @@ export async function startBot() {
       await welcomeNewProjectMember(update);
     }
   });
-  startWebBridge({
-    store,
-    token: config.groupToken,
-    founderTelegramId: config.founderTelegramId,
-    onClientReady: (project, clientName) => askFounderForPlan({ project, clientName }),
-  });
+  startWebBridge({ store, token: config.groupToken, founderTelegramId: config.founderTelegramId });
   setInterval(() => syncGroupRoster().catch((error) => console.warn(error.message)), 60_000);
   syncGroupRoster().catch((error) => console.warn(error.message));
   setInterval(
@@ -179,4 +196,15 @@ export async function startBot() {
     else if (update.message?.text) await leaderNaturalLanguageReply(update.message);
     if (update.callback_query) await leaderCallback(update.callback_query);
   });
+
+  setInterval(
+    () =>
+      retryProjectResources(store, archiveProjectResource).catch(() =>
+        console.warn('Project file storage retry pending.'),
+      ),
+    60_000,
+  );
+  retryProjectResources(store, archiveProjectResource).catch(() =>
+    console.warn('Project file storage retry pending.'),
+  );
 }

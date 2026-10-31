@@ -2,9 +2,10 @@ import { sendMessage, answerCallback } from '../integrations/telegram.js';
 import { completionBlockReason, resolveDrawing } from '../workflow/engine.js';
 import { aiEnabled, interpretProjectUpdate } from '../integrations/openai.js';
 import crypto from 'node:crypto';
+import { hasRole, matchesRole } from '../projects/roles.js';
 import { groupOnly, escape, actor } from './message-utils.js';
 
-export function createGroupHandlers({ config, recordGroupMember, store }) {
+export function createGroupHandlers({ config, leaderCallback, recordGroupMember, store }) {
   const aiDrafts = new Map();
   async function requireProject(chat, token) {
     if (!groupOnly(chat)) {
@@ -51,15 +52,17 @@ export function createGroupHandlers({ config, recordGroupMember, store }) {
       );
       return false;
     }
-    if (
-      task.AssignedTelegramID &&
-      String(task.AssignedTelegramID) !== String(from.id) &&
-      String(from.id) !== config.founderTelegramId
-    ) {
+    const projectFounder =
+      groupMember?.MembershipStatus === 'Active' && hasRole(groupMember.AssignedRole, 'Founder');
+    const owns = task.AssignedTelegramID
+      ? String(task.AssignedTelegramID) === String(from.id)
+      : groupMember?.MembershipStatus === 'Active' &&
+        matchesRole(groupMember.AssignedRole, task.AssignedRole);
+    if (!owns && !projectFounder && String(from.id) !== config.founderTelegramId) {
       await sendMessage(
         token,
         chatId,
-        `Only the assigned team member or the founder can update <code>${task.TaskID}</code>.`,
+        'Only the assignee, responsible role or project founder can update this task.',
       );
       return false;
     }
@@ -67,12 +70,32 @@ export function createGroupHandlers({ config, recordGroupMember, store }) {
   }
 
   async function submitDelay({ project, task, user, days, reason, groupChatId }) {
+    if (task.Status === 'Completed' || /^(Archived|Cancelled|Closed)/.test(task.Status || ''))
+      return sendMessage(
+        config.groupToken,
+        groupChatId,
+        `<b>${escape(task.TaskName)}</b> is ${escape(task.Status)}, so it cannot be delayed.`,
+      );
+    if (task.Status === 'Delay Requested')
+      return sendMessage(
+        config.groupToken,
+        groupChatId,
+        `A delay for <b>${escape(task.TaskName)}</b> is already waiting for approval.`,
+      );
     const approvalId = await store.requestDelay({ project, task, actor: user, days, reason });
     const approverTelegramId = project.LeaderTelegramID || config.founderTelegramId;
     await sendMessage(
       config.groupToken,
       groupChatId,
-      `⏳ Delay request sent for approval: <b>${escape(task.TaskName)}</b> — ${days} day(s).`,
+      `⏳ <b>${escape(task.TaskName)}</b> — ${days} day(s) delay requested. A project founder can decide.`,
+      {
+        inline_keyboard: [
+          [
+            { text: 'Approve', callback_data: `approve:${approvalId}` },
+            { text: 'Reject', callback_data: `reject:${approvalId}` },
+          ],
+        ],
+      },
     );
     return sendMessage(
       config.leaderToken,
@@ -232,6 +255,40 @@ export function createGroupHandlers({ config, recordGroupMember, store }) {
     const text = message.text?.trim() ?? '';
     const [rawCommand, ...argumentsList] = text.split(/\s+/);
     const command = rawCommand?.split('@')[0];
+    if (message.chat.type === 'private' && command === '/start') {
+      const base = process.env.WEB_APP_URL?.replace(/\/$/, '');
+      if (!base || !process.env.INTEGRATION_SHARED_SECRET)
+        return sendMessage(
+          config.groupToken,
+          message.chat.id,
+          'Personal task digests are not configured yet.',
+        );
+      try {
+        const response = await fetch(`${base}/api/integrations/telegram/connect`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${process.env.INTEGRATION_SHARED_SECRET}`,
+          },
+          body: JSON.stringify({ telegramUserId: String(message.from.id) }),
+          signal: AbortSignal.timeout(10000),
+        });
+        const result = await response.json();
+        return sendMessage(
+          config.groupToken,
+          message.chat.id,
+          response.ok
+            ? 'Connected. Your morning task list will arrive here.'
+            : escape(result.error || 'Ask the founder to assign your profile first.'),
+        );
+      } catch {
+        return sendMessage(
+          config.groupToken,
+          message.chat.id,
+          'Could not connect just now. Please try /start again.',
+        );
+      }
+    }
     if (groupOnly(message.chat) && (command === '/start' || command === '/join')) {
       await recordGroupMember(message.chat, message.from, 'Active');
       if (command === '/join')
@@ -381,6 +438,8 @@ export function createGroupHandlers({ config, recordGroupMember, store }) {
   }
 
   async function groupCallback(callback) {
+    if (/^(approve|reject):/.test(callback.data || ''))
+      return leaderCallback(callback, config.groupToken);
     if (!callback.data.startsWith('ai_')) return;
     const [, action, draftId] = callback.data.split(':');
     const draft = aiDrafts.get(draftId);

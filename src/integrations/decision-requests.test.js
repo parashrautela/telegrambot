@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   captureDecisionRequest,
   parseDecisionRequest,
+  parseClientRequest,
   parseGroupRequest,
   retryDecisionRequestSync,
 } from './decision-requests.js';
@@ -93,41 +94,32 @@ test('capture persists raw content, project and role, and deduplicates repeated 
   assert.equal(records[0].OriginalMessage, '=1+1');
 });
 
-test('ordinary group chat captures client queries and staff context without commands or bot messages', () => {
+test('assigned client ordinary text and photo become queries without capturing staff or commands', () => {
   const project = { ProjectID: 'P001', GroupChatID: '-123', ClientTelegramID: '42' };
   const clientMessage = {
     ...message,
     from: { id: 42, first_name: 'Maya' },
     text: 'Can we move the light?',
   };
-  const request = parseGroupRequest(clientMessage, project, 'our_bot');
+  const request = parseClientRequest(clientMessage, project, 'our_bot');
   assert.equal(request.OriginalMessage, clientMessage.text);
   assert.equal(request.AutomaticClientQuery, 'Yes');
   assert.equal(request.RequestID, 'REQ--123-10-question');
-  assert.equal(parseGroupRequest(message, project, 'our_bot'), null);
-  assert.equal(parseGroupRequest({ ...clientMessage, text: '/tasks' }, project, 'our_bot'), null);
+  assert.equal(parseClientRequest(message, project, 'our_bot'), null);
+  assert.equal(parseClientRequest({ ...clientMessage, text: '/tasks' }, project, 'our_bot'), null);
   assert.equal(
-    parseGroupRequest(clientMessage, { ...project, GroupChatID: '-456' }, 'our_bot'),
+    parseClientRequest(clientMessage, { ...project, GroupChatID: '-456' }, 'our_bot'),
     null,
   );
   assert.equal(
-    parseGroupRequest({ ...clientMessage, from: { id: 42, is_bot: true } }, project, 'our_bot'),
+    parseClientRequest({ ...clientMessage, from: { id: 42, is_bot: true } }, project, 'our_bot'),
     null,
   );
   assert.equal(
-    parseGroupRequest(clientMessage, { ...project, ClientTelegramID: '' }, 'our_bot').RequestType,
-    'Message',
+    parseClientRequest(clientMessage, { ...project, ClientTelegramID: '' }, 'our_bot'),
+    null,
   );
-  const staff = parseGroupRequest(
-    { ...message, text: 'Materials have arrived' },
-    project,
-    'our_bot',
-  );
-  assert.equal(staff.RequestType, 'Message');
-  assert.equal(staff.RequestID, 'REQ--123-10-message');
-  assert.equal(staff.OriginalSenderName, 'Lead');
-  assert.equal(staff.AutomaticClientQuery, undefined);
-  const photo = parseGroupRequest(
+  const photo = parseClientRequest(
     { ...clientMessage, text: undefined, photo: [{ file_id: 'small' }, { file_id: 'large' }] },
     project,
     'our_bot',
@@ -178,4 +170,115 @@ test('persisted request sync retries failures and stops after acknowledged deliv
   assert.ok(row.WebSyncedAt);
   await retryDecisionRequestSync(store);
   assert.equal(count, 2);
+});
+test('/query and /update are the group tags; plain team chat is ignored', () => {
+  const query = parseDecisionRequest(
+    { ...message, text: '/query When does tiling start?' },
+    'our_bot',
+  );
+  assert.deepEqual([query.RequestType, query.RequestID], ['Question', 'REQ--123-10-question']);
+  assert.equal(
+    parseDecisionRequest({ ...message, text: '/update@our_bot Walls done' }, 'our_bot').RequestType,
+    'Update',
+  );
+  const photo = parseDecisionRequest(
+    {
+      ...message,
+      text: undefined,
+      caption: '/update Plaster finished',
+      photo: [{ file_id: 'a' }, { file_id: 'b' }],
+    },
+    'our_bot',
+  );
+  assert.equal(photo.OriginalMessage, 'Plaster finished');
+  assert.equal(JSON.parse(photo.AttachmentsJSON)[0].fileId, 'b');
+  const reply = parseDecisionRequest(
+    {
+      ...message,
+      text: '/query',
+      reply_to_message: {
+        message_id: 4,
+        from: { id: 9, first_name: 'Carpenter' },
+        photo: [{ file_id: 'p' }],
+      },
+    },
+    'our_bot',
+  );
+  assert.equal(reply.OriginalSenderName, 'Carpenter');
+  assert.equal(JSON.parse(reply.AttachmentsJSON)[0].fileId, 'p');
+  const project = { ClientTelegramID: '50', GroupChatID: '-123' };
+  assert.equal(
+    parseClientRequest(
+      { ...message, from: { id: 1, first_name: 'Worker' }, text: 'ping' },
+      project,
+      'our_bot',
+    ),
+    null,
+  );
+  assert.equal(
+    parseClientRequest(
+      { ...message, from: { id: 50, first_name: 'Client' }, text: 'When is handover?' },
+      project,
+      'our_bot',
+    ).AutomaticClientQuery,
+    'Yes',
+  );
+});
+
+test('automatic client messages accept every current client and reject other people', () => {
+  const project = { GroupChatID: '-123', ClientTelegramID: '42', ClientTelegramIDs: '42,43' };
+  for (const id of [42, 43])
+    assert.ok(
+      parseClientRequest(
+        { ...message, from: { id, first_name: 'Client' }, text: 'Please review the drawing' },
+        project,
+        'our_bot',
+      ),
+    );
+  assert.equal(
+    parseClientRequest(
+      { ...message, from: { id: 44 }, text: 'Other conversation' },
+      project,
+      'our_bot',
+    ),
+    null,
+  );
+});
+
+test('group capture keeps staff and unassigned senders as context and active clients as queries', () => {
+  const project = { ProjectID: 'P001', GroupChatID: '-123', ClientTelegramIDs: '42,43' };
+  const staff = { ...message, text: 'Materials arrived' };
+  const context = parseGroupRequest(staff, project, 'our_bot');
+  assert.equal(context.RequestType, 'Message');
+  assert.equal(context.RequestID, 'REQ--123-10-message');
+  assert.equal(context.OriginalMessage, 'Materials arrived');
+  assert.equal(context.AutomaticClientQuery, undefined);
+  for (const id of [42, 43])
+    assert.equal(
+      parseGroupRequest({ ...staff, from: { id } }, project, 'our_bot').AutomaticClientQuery,
+      'Yes',
+    );
+  assert.equal(
+    parseGroupRequest(
+      { ...staff, from: { id: 42 } },
+      { ...project, ClientTelegramIDs: '', ClientTelegramID: '' },
+      'our_bot',
+    ).RequestType,
+    'Message',
+  );
+  assert.equal(
+    parseGroupRequest({ ...staff, from: { id: 1, is_bot: true } }, project, 'our_bot'),
+    null,
+  );
+  assert.equal(parseGroupRequest(message, project, 'our_bot'), null);
+  assert.equal(
+    parseGroupRequest({ ...staff, chat: { id: -456, type: 'supergroup' } }, project, 'our_bot'),
+    null,
+  );
+  const photo = parseGroupRequest(
+    { ...staff, text: undefined, photo: [{ file_id: 'small' }, { file_id: 'large' }] },
+    project,
+    'our_bot',
+  );
+  assert.equal(JSON.parse(photo.AttachmentsJSON)[0].fileId, 'large');
 });

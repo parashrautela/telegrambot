@@ -754,7 +754,10 @@ export class WorkspaceStore {
       notifications,
       notificationUnread,
       clients: user.role === 'Founder' ? this.all('SELECT * FROM clients ORDER BY name') : [],
-      workflows: WORKFLOW_OPTIONS.map((w) => ({ ...w, taskCount: WORKFLOWS[w.id].length })),
+      workflows: WORKFLOW_OPTIONS.filter((w) => !w.webOnly).map((w) => ({
+        ...w,
+        taskCount: WORKFLOWS[w.id].length,
+      })),
     };
   }
 }

@@ -11,9 +11,9 @@ export function createProjectHandlers({ config, store }) {
   }
 
   async function projectTldr(project) {
-    const tasks = (await store.tasksForProject(project.ProjectID)).sort(
-      (left, right) => Number(left.Sequence) - Number(right.Sequence),
-    );
+    const tasks = (await store.tasksForProject(project.ProjectID))
+      .filter((task) => !String(task.Status).startsWith('Archived'))
+      .sort((left, right) => Number(left.Sequence) - Number(right.Sequence));
     const completed = tasks.filter((task) => task.Status === 'Completed').length;
     const current = tasks.find((task) => !['Completed', 'Archived'].includes(task.Status));
     const issues = tasks.filter((task) => task.Status === 'Issue Reported').length;
@@ -59,6 +59,11 @@ export function createProjectHandlers({ config, store }) {
   }
 
   async function askFounderForPlan({ project, clientName, replaceUntouchedLegacyPlan = false }) {
+    if (
+      project.WebManaged === 'Yes' ||
+      (process.env.WEB_APP_URL && process.env.INTEGRATION_SHARED_SECRET)
+    )
+      return; // The web app owns setup for this project.
     const legacyNote = replaceUntouchedLegacyPlan
       ? '\n\nThis project has an untouched legacy house plan. Choosing an option will archive those unused task records and generate the selected plan; nothing is deleted.'
       : '';
@@ -67,7 +72,7 @@ export function createProjectHandlers({ config, store }) {
       config.founderTelegramId,
       `<b>Client profile complete</b>\n\n${escape(clientName)} is now marked as the client for <b>${escape(project.ProjectName)}</b>. Which plan should we assign?\n\nThe selected plan will generate the project tasks and share its linked resources with the group.${legacyNote}`,
       {
-        inline_keyboard: WORKFLOW_OPTIONS.map((option) => [
+        inline_keyboard: WORKFLOW_OPTIONS.filter((option) => !option.webOnly).map((option) => [
           { text: option.label, callback_data: `choose_plan:${project.ProjectID}:${option.id}` },
         ]),
       },

@@ -1,3 +1,4 @@
+import { rolesOf, hasRole, matchesRole, roleText, isStaff } from '../projects/roles.js';
 import crypto from 'node:crypto';
 import { googleConfig } from '../config/environment.js';
 import { SHEETS, WORKFLOWS, templateRecord } from '../workflow/schema.js';
@@ -101,10 +102,25 @@ export class SheetStore {
     const known = new Set(existing.map((row) => row.WorkflowID));
     for (const [workflowId, steps] of Object.entries(WORKFLOWS)) {
       if (!known.has(workflowId)) {
-        for (const step of steps) await this.append('WorkflowTemplates', templateRecord(step));
+        // One call per workflow. Row-by-row appends of a 68-step plan exceed the Sheets write quota.
+        await this.appendRows('WorkflowTemplates', steps.map(templateRecord));
         continue;
       }
-      if (steps.some((step) => step[9])) continue;
+      if (steps.some((step) => step[9])) {
+        // Fill only blank durations from the code template. Values founders typed into the sheet always win.
+        const fills = existing
+          .filter(
+            (row) => row.WorkflowID === workflowId && String(row.DurationDays ?? '').trim() === '',
+          )
+          .flatMap((row) => {
+            const step = steps.find((item) => String(item[1]) === String(row.Sequence));
+            return step && step[4] !== '' && step[4] !== undefined
+              ? [{ rowNumber: row.rowNumber, changes: { DurationDays: String(step[4]) } }]
+              : [];
+          });
+        await this.updateRows('WorkflowTemplates', fills);
+        continue;
+      }
       const workflowRows = existing.filter((row) => row.WorkflowID === workflowId);
       const resourceStep = steps.find((step) => Number(step[1]) === 5);
       if (resourceStep && !workflowRows.some((row) => Number(row.Sequence) === 5)) {
@@ -164,6 +180,37 @@ export class SheetStore {
         body: JSON.stringify({ values: [values] }),
       },
     );
+  }
+
+  // Many new rows in one values:append call, in the given order.
+  async appendRows(sheetName, objects, { raw = false } = {}) {
+    if (!objects.length) return;
+    const headers = SHEETS[sheetName];
+    const values = objects.map((object) => headers.map((header) => object[header] ?? ''));
+    await this.request(
+      `/values/${encodeURIComponent(`${sheetName}!A:AZ`)}:append?valueInputOption=${raw ? 'RAW' : 'USER_ENTERED'}&insertDataOption=INSERT_ROWS`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ values }),
+      },
+    );
+  }
+
+  // One API call for many rows. Delay propagation and web syncs touch dozens of rows; per-row calls hit the Sheets quota.
+  async updateRows(sheetName, rowChanges) {
+    const headers = SHEETS[sheetName];
+    const data = rowChanges.flatMap(({ rowNumber, changes }) =>
+      Object.entries(changes).map(([field, value]) => {
+        const column = headers.indexOf(field);
+        if (column < 0) throw new Error(`Unknown ${sheetName} field: ${field}`);
+        return { range: `${sheetName}!${columnLetter(column)}${rowNumber}`, values: [[value]] };
+      }),
+    );
+    if (!data.length) return;
+    await this.request('/values:batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data }),
+    });
   }
 
   async updateRow(sheetName, rowNumber, changes) {
@@ -299,6 +346,12 @@ export class SheetStore {
       MembershipStatus: status,
       UpdatedAt: now(),
     };
+    if (
+      existing &&
+      existing.TelegramName === changes.TelegramName &&
+      existing.MembershipStatus === status
+    )
+      return false;
     if (existing) await this.updateRow('GroupMembers', existing.rowNumber, changes);
     else
       await this.append(
@@ -306,9 +359,13 @@ export class SheetStore {
         { GroupChatID: String(groupChatId), TelegramUserID: String(member.id), ...changes },
         { raw: true },
       );
+    return true;
   }
 
   async assignGroupRole({ groupChatId, telegramUserId, name, role }) {
+    role = roleText(role);
+    if (!role || role.length > 160 || rolesOf(role).length > 6)
+      throw new Error('Choose between one and six project roles.');
     const existing = (await this.rows('GroupMembers')).find(
       (row) =>
         String(row.GroupChatID) === String(groupChatId) &&
@@ -344,8 +401,13 @@ export class SheetStore {
       groupChatId: String(group.GroupChatID),
       title: group.GroupTitle,
       status: group.Status,
+      migratedTo: group.MigratedTo || '',
       members: members
-        .filter((member) => String(member.GroupChatID) === String(group.GroupChatID))
+        .filter(
+          (member) =>
+            String(member.GroupChatID) === String(group.GroupChatID) &&
+            ['Active', 'Left'].includes(member.MembershipStatus),
+        )
         .map((member) => ({
           telegramUserId: String(member.TelegramUserID),
           telegramName: member.TelegramName,
@@ -438,11 +500,18 @@ export class SheetStore {
     fileId,
     fileName,
     caption,
+    sourceMessageId,
+    mimeType,
   }) {
-    await this.append('SubmittedResources', {
-      SubmissionID: id('RES'),
+    const submissionId = `RES-${groupChatId}-${sourceMessageId}`;
+    const existing = (await this.rows('SubmittedResources')).find(
+      (row) => row.SubmissionID === submissionId,
+    );
+    if (existing) return { record: existing, created: false };
+    const record = {
+      SubmissionID: submissionId,
       ProjectID: projectId,
-      TaskID: taskId,
+      TaskID: taskId || '',
       GroupChatID: String(groupChatId),
       TelegramUserID: String(user.id),
       SubmittedByName: user.name,
@@ -451,10 +520,22 @@ export class SheetStore {
       FileName: fileName,
       Caption: caption,
       SubmittedAt: now(),
-    });
+      SourceMessageID: String(sourceMessageId),
+      MimeType: mimeType || '',
+      DriveStatus: 'Pending',
+      WebSyncStatus: '',
+    };
+    await this.append('SubmittedResources', record, { raw: true });
+    return { record, created: true };
   }
 
-  async closeProject({ project, outcome, actorTelegramId, actorName }) {
+  async closeProject({
+    project,
+    outcome,
+    actorTelegramId,
+    actorName,
+    source = 'Telegram founder bot',
+  }) {
     const closedAt = now();
     const isCompleted = outcome === 'Completed';
     const taskStatus = isCompleted ? 'Closed — Project completed' : 'Cancelled — Project abandoned';
@@ -496,7 +577,7 @@ export class SheetStore {
     }
     await this.updateRow('Projects', project.rowNumber, {
       Status: outcome,
-      Notes: `${outcome} by founder after leaving the project group on ${closedAt}. Historical data retained.`,
+      Notes: `${outcome} by founder via ${source} on ${closedAt}. Historical data retained.`,
     });
     await this.audit({
       projectId: project.ProjectID,
@@ -505,7 +586,7 @@ export class SheetStore {
       newValue: outcome,
       actor: actorTelegramId,
       actorName,
-      source: 'Telegram founder bot',
+      source,
       details: `${tasks.filter((task) => !activeTaskStatuses.has(task.Status)).length} open task(s) moved to ${taskStatus}; ${members.length} project member record(s) deactivated; data retained.`,
     });
     return {

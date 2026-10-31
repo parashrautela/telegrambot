@@ -106,3 +106,24 @@ test('project shells also require client information', async () => {
     /Assign a client/,
   );
 });
+
+test('a role change revokes an old client onboarding approval', async () => {
+  const { store, project, data } = fixture();
+  data.GroupMembers.push({
+    GroupChatID: '-123',
+    TelegramUserID: '42',
+    AssignedRole: 'Designer',
+    MembershipStatus: 'Active',
+  });
+  data.MemberOnboarding.push({
+    ProjectID: 'P001',
+    TelegramUserID: '42',
+    AssignedName: 'Maya',
+    AssignedRole: 'Client',
+    Status: 'Approved',
+  });
+  await assert.rejects(
+    assignWorkflowToProject({ store, project, workflowId: 'TEST' }),
+    /active, approved client/,
+  );
+});

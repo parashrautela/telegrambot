@@ -1,4 +1,5 @@
 import { buildScheduledTasks, isGraphTemplate } from '../workflow/engine.js';
+import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
 
 const dateText = (date) => date.toISOString().slice(0, 10);
 const plusDays = (date, days) => new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
@@ -72,21 +73,22 @@ export async function assignWorkflowToProject({
       (member) =>
         String(member.GroupChatID) === String(project.GroupChatID) &&
         member.MembershipStatus === 'Active' &&
-        /\bclient\b/i.test(member.AssignedRole || ''),
+        hasRole(member.AssignedRole, 'Client'),
     )
     .map((member) => ({ telegramId: String(member.TelegramUserID), name: member.AssignedName }));
   for (const member of onboardings.filter(
     (member) =>
       member.ProjectID === project.ProjectID &&
       member.Status === 'Approved' &&
-      /\bclient\b/i.test(member.AssignedRole || ''),
+      hasRole(member.AssignedRole, 'Client'),
   )) {
     const roster = groupMembers.find(
       (row) =>
         String(row.GroupChatID) === String(project.GroupChatID) &&
         String(row.TelegramUserID) === String(member.TelegramUserID),
     );
-    if (roster && roster.MembershipStatus !== 'Active') continue;
+    if (roster && (roster.MembershipStatus !== 'Active' || !hasRole(roster.AssignedRole, 'Client')))
+      continue;
     if (!candidates.some((row) => row.telegramId === String(member.TelegramUserID)))
       candidates.push({ telegramId: String(member.TelegramUserID), name: member.AssignedName });
   }
@@ -98,7 +100,7 @@ export async function assignWorkflowToProject({
           String(clientName || project.ClientName || '')
             .trim()
             .toLowerCase(),
-      ) || (candidates.length === 1 ? candidates[0] : null);
+      ) || candidates[0];
   if (!assignedClient)
     throw new Error('An active, approved client must be assigned before selecting a workflow.');
   const existingTasks = await store.tasksForProject(project.ProjectID);
@@ -144,14 +146,15 @@ export async function assignWorkflowToProject({
   let scheduledTargetEnd = targetEndDate;
   if (scheduled) {
     scheduledTargetEnd = scheduled.targetEndDate;
-    for (const task of scheduled.tasks) {
-      await store.append('Tasks', {
-        ...task,
-        ProjectID: project.ProjectID,
-        LastUpdatedAt: new Date().toISOString(),
-        LastUpdatedBy: String(actorTelegramId || 'System'),
-      });
-    }
+    const rows = scheduled.tasks.map((task) => ({
+      ...task,
+      ProjectID: project.ProjectID,
+      LastUpdatedAt: new Date().toISOString(),
+      LastUpdatedBy: String(actorTelegramId || 'System'),
+    }));
+    // A graph plan can have dozens of tasks (INTERIOR-SHEET-V1 has 68). One batched append stays inside the Sheets write quota.
+    if (store.appendRows) await store.appendRows('Tasks', rows);
+    else for (const row of rows) await store.append('Tasks', row);
   } else {
     let cursor = startDate;
     for (const template of workflow) {
@@ -187,6 +190,7 @@ export async function assignWorkflowToProject({
   await store.updateRow('Projects', project.rowNumber, {
     ClientName: assignedClient.name || clientName || project.ClientName,
     ClientTelegramID: assignedClient.telegramId,
+    ClientTelegramIDs: candidates.map((member) => member.telegramId).join(','),
     Status: 'Active',
     TargetEndDate: scheduledTargetEnd,
     Notes: `Workflow ${workflowId} assigned after client onboarding${replaceUntouchedLegacyPlan ? '; untouched legacy HOUSE-V1 tasks archived.' : ''}`,
