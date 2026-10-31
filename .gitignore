@@ -3,3 +3,14 @@
 tuckbox-design/
 frontend/node_modules/
 frontend/dist/
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+node_modules/
+*.log
+coverage/
+
+# Machine-specific preview launch configuration.
+.claude/

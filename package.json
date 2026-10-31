@@ -3,15 +3,32 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
-    "test:requests": "node --test src/decision-requests.test.js src/web-bridge.test.js",
-    "setup-sheet": "node --env-file=.env src/setup-sheet.js",
-    "seed-workflow": "node --env-file=.env src/seed-workflow.js",
-    "create-demo-project": "node --env-file=.env src/create-demo-project.js",
     "start": "node src/index.js",
     "start:local": "node --env-file=.env src/index.js",
+    "workspace": "node --env-file-if-exists=.env src/workspace/server.js",
+    "workspace:demo": "node scripts/workspace-demo.js",
     "frontend": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
-    "check": "node --check src/index.js && node --check src/ai.js && node --check src/schema.js && node --check src/sheets.js && node --check src/telegram.js && node --check src/project-service.js && node --check src/seed-workflow.js && node --check src/residential-interior.js && node --check src/workflow-engine.js && node src/check-workflow-engine.js"
+    "test": "node --test src/**/*.test.js scripts/*.test.js",
+    "test:workspace": "node --test src/workspace/*.test.js src/projects/*.test.js",
+    "test:engine": "node --test src/workflow/*.test.js",
+    "test:requests": "node --test src/integrations/*.test.js",
+    "check": "node scripts/check-source.js && node scripts/check-workflow-engine.js",
+    "verify": "npm run check && npm test && npm run frontend:build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "setup-sheet": "node --env-file=.env scripts/setup-sheet.js",
+    "seed-workflow": "node --env-file=.env scripts/seed-workflow.js",
+    "create-demo-project": "node --env-file=.env scripts/create-demo-project.js",
+    "web:dev": "npm --prefix work/production-web run dev",
+    "web:verify": "npm --prefix work/production-web run verify",
+    "verify:all": "npm run verify && npm run web:verify"
+  },
+  "devDependencies": {
+    "prettier": "3.9.6"
   }
 }
