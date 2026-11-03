@@ -21,6 +21,7 @@ const rowsOf = (sheet) => (sheets[sheet] ||= []);
 const store = {
   rows: async (sheet) => rowsOf(sheet),
   tasksForProject: async (projectId) => sheets.Tasks.filter((task) => task.ProjectID === projectId).map((task) => ({ ...task })),
+  saveStageOrder: async (project, tasks) => { for (const task of tasks) Object.assign(sheets.Tasks.find((row) => row.TaskID === task.TaskID), task); },
   projectForGroup: async (groupChatId) => sheets.Projects.find((project) => String(project.GroupChatID) === String(groupChatId)),
   append: async (sheet, row) => { rowsOf(sheet).push({ ...row, rowNumber: rowsOf(sheet).length + 2 }); },
   appendRows: async (sheet, rows) => { for (const row of rows) rowsOf(sheet).push({ ...row, rowNumber: rowsOf(sheet).length + 2 }); },
