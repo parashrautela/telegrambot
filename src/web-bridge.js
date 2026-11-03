@@ -1,3 +1,4 @@
+import { createStageOrderBridge } from './stage-order.js';
 import { notifyQuery } from "./query-notifications.js";
 import {planStageConnections,connectionFingerprint} from './stage-connections.js';
 import { rolesOf, hasRole, matchesRole, roleText, isStaff } from './roles.js';
@@ -73,12 +74,14 @@ export function startWebBridge({ store, token, founderTelegramId }) {
   const secret = process.env.INTEGRATION_SHARED_SECRET;
   if (!secret) return null;
   const port = Number(process.env.BOT_BRIDGE_PORT || process.env.PORT || 3001);
+  const reorderStages = createStageOrderBridge({ store, founderTelegramId });
   const startingProjects = new Set();
   const replyingRequests = new Set();
   const server = http.createServer(async (req, res) => {
     try {
       if (req.method === 'GET' && req.url === '/health') return respond(res, 200, { ok: true });
       if (!equal((req.headers.authorization || '').replace(/^Bearer /i, ''), secret)) return respond(res, 401, { error: 'Integration authentication required.' });
+      if (req.method === 'POST' && req.url === '/api/integrations/web/stages/reorder') return respond(res, 200, await reorderStages(await readBody(req)));
       if (req.method === 'POST' && req.url === '/api/integrations/web/projects/close') {
         const input = await readBody(req);
         if (!['Completed', 'Abandoned'].includes(input.outcome)) return respond(res, 400, { error: 'Choose Completed or Abandoned.' });

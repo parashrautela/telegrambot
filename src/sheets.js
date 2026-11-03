@@ -173,6 +173,43 @@ export class SheetStore {
     });
   }
 
+  async saveStageOrder(project, tasks, actorId) {
+    const fields = [
+      'Sequence',
+      'ForecastStart',
+      'ForecastEnd',
+      'CurrentStart',
+      'CurrentEnd',
+      'PredecessorTaskID',
+      'PredecessorTaskIDs',
+      'DependencyType',
+    ];
+    const timestamp = new Date().toISOString();
+    const data = tasks.flatMap((task) =>
+      Object.entries({
+        ...Object.fromEntries(fields.map((field) => [field, task[field]])),
+        LastUpdatedAt: timestamp,
+        LastUpdatedBy: String(actorId),
+      }).map(([field, value]) => ({
+        range: `Tasks!${columnLetter(SHEETS.Tasks.indexOf(field))}${task.rowNumber}`,
+        values: [[value]],
+      })),
+    );
+    const finish =
+      tasks
+        .map((task) => task.ForecastEnd)
+        .sort()
+        .at(-1) || '';
+    data.push({
+      range: `Projects!${columnLetter(SHEETS.Projects.indexOf('TargetEndDate'))}${project.rowNumber}`,
+      values: [[finish]],
+    });
+    await this.request('/values:batchUpdate', {
+      method: 'POST',
+      body: JSON.stringify({ valueInputOption: 'RAW', data }),
+    });
+  }
+
   async audit({ projectId, taskId = '', action, oldValue = '', newValue = '', actor, actorName, source, details = '' }) {
     await this.append('AuditLog', {
       AuditID: id('AUD'), OccurredAt: now(), ProjectID: projectId, TaskID: taskId,
