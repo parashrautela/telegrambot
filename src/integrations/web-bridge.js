@@ -7,7 +7,7 @@ import http from 'node:http';
 import { loadTelegramAttachment } from './telegram-media.js';
 import { timingSafeEqual } from 'node:crypto';
 import { createProjectShell, assignWorkflowToProject } from '../projects/service.js';
-import { getChatMember, getMe, sendMessage } from './telegram.js';
+import { getChatMember, getMe, sendMessage, sendVoice } from './telegram.js';
 
 import { downloadProjectResource } from './drive-storage.js';
 import { BLANK_WORKFLOW_ID, WORKFLOW_OPTIONS } from '../workflow/schema.js';
@@ -747,6 +747,7 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         req.method === 'POST' &&
         [
           '/api/integrations/web/decisions/content',
+          '/api/integrations/web/decisions/voice',
           '/api/integrations/web/decisions/publish',
           '/api/integrations/web/decisions/notify',
         ].includes(req.url)
@@ -760,6 +761,34 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         if (!request) return respond(res, 404, { error: 'Request not found in the linked group.' });
         if (req.url.endsWith('/notify'))
           return respond(res, 200, await notifyQuery({ store, request, input, token }));
+        if (req.url.endsWith('/voice')) {
+          const ids = input.telegramUserIds;
+          if (
+            !Array.isArray(ids) ||
+            !ids.length ||
+            ids.length > 10 ||
+            ids.some((id) => !/^\d+$/.test(String(id)))
+          )
+            return respond(res, 400, { error: 'Invalid founder list.' });
+          const voices = JSON.parse(request.AttachmentsJSON || '[]').filter(
+            (item) => item.type === 'voice',
+          );
+          const project = await store.projectForGroup(String(request.GroupChatID));
+          const caption = `Voice message from ${request.OriginalSenderName || 'a client'}${project ? ` · ${project.ProjectName}` : ''}`;
+          let sent = 0;
+          for (const id of ids) {
+            if (!(await store.user(String(id)))) continue;
+            for (const voice of voices) {
+              try {
+                await sendVoice(token, id, voice.fileId, caption);
+                sent++;
+              } catch {
+                // Telegram refuses until that founder has pressed Start on this bot; the web inbox still has the note.
+              }
+            }
+          }
+          return respond(res, 200, { sent });
+        }
         if (req.url.endsWith('/content')) {
           const attachments = JSON.parse(request.AttachmentsJSON || '[]');
           if (

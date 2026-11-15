@@ -43,6 +43,14 @@ test('web bridge assigns a group role and creates a linked project shell', async
       AttachmentsJSON: JSON.stringify([{ type: 'Photo', fileId: 'photo' }]),
       rowNumber: 2,
     },
+    {
+      RequestID: 'voice',
+      GroupChatID: '-456',
+      SourceMessageID: '11',
+      OriginalSenderName: 'Asha',
+      AttachmentsJSON: JSON.stringify([{ type: 'voice', fileId: 'voice-file' }]),
+      rowNumber: 3,
+    },
   ];
   const store = {
     upsertGroupMember: async () => {},
@@ -62,6 +70,8 @@ test('web bridge assigns a group role and creates a linked project shell', async
       members[0].AssignedRole = role;
       return true;
     },
+    user: async (id) =>
+      ['7001', '7002'].includes(String(id)) ? { TelegramUserID: id } : undefined,
     tasksForProject: async (id) => tasks.filter((t) => t.ProjectID === id),
     projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id),
     onboardingForMember: async () => null,
@@ -87,7 +97,16 @@ test('web bridge assigns a group role and creates a linked project shell', async
     markGroupLinked: async () => {},
   };
   const sent = [];
+  const voices = [];
   globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith('/sendVoice')) {
+      const input = JSON.parse(options.body);
+      // 7002 has not pressed Start on the bot, so Telegram refuses.
+      if (input.chat_id === '7002')
+        return Response.json({ ok: false, description: 'Forbidden' }, { status: 403 });
+      voices.push(input);
+      return Response.json({ ok: true, result: { message_id: 2 } });
+    }
     if (String(url).endsWith('/getMe'))
       return Response.json({ ok: true, result: { id: 99, username: 'test_bot' } });
     if (String(url).endsWith('/getChatMemberCount')) return Response.json({ ok: true, result: 2 });
@@ -142,6 +161,19 @@ test('web bridge assigns a group role and creates a linked project shell', async
       Buffer.from((await post(content, query)).body.bytes, 'base64').toString(),
       'PHOTO',
     );
+    const voice = '/api/integrations/web/decisions/voice';
+    const note = {
+      requestId: 'voice',
+      groupChatId: '-456',
+      telegramUserIds: ['7001', '7002', '7003'],
+    };
+    assert.equal((await post(voice, note, false)).status, 401);
+    assert.equal((await post(voice, { ...note, telegramUserIds: ['x'] })).status, 400);
+    assert.equal((await post(voice, { ...note, requestId: 'req' })).body.sent, 0);
+    assert.equal((await post(voice, note)).body.sent, 1);
+    assert.deepEqual(voices, [
+      { chat_id: '7001', voice: 'voice-file', caption: 'Voice message from Asha' },
+    ]);
     const reply = { requestId: 'req', groupChatId: '-456', response: 'Hello <literal>' };
     assert.equal((await post(publish, reply)).body.result.message_id, 1);
     assert.equal(sent[0].text, 'Hello <literal>');
