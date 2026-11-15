@@ -62,7 +62,12 @@ export async function refreshGroupMembers({
         member = await api.getChatMember(token, chatId, id);
       } catch (error) {
         if (telegramUserId) throw error;
-        warnings.push('Some known memberships could not be checked. Refresh again.');
+        // Telegram does not know this ID (a deleted, test or never-used account), so they cannot be
+        // in this group. That is not worth a warning that pressing Refresh again can never clear.
+        if (!/user not found|PARTICIPANT_ID_INVALID/i.test(error.message)) {
+          console.warn(`Membership check failed for ${id} in ${chatId}: ${error.message}`);
+          warnings.push('Some known memberships could not be checked. Refresh again.');
+        }
         continue;
       }
       if (telegramUserId && (!activeMembership(member) || member.user.is_bot))

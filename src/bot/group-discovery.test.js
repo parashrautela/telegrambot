@@ -69,3 +69,42 @@ test('refresh recovers known existing people, verifies departures and reports gr
   );
   assert.equal(activeMembership({ status: 'restricted', is_member: false }), false);
 });
+
+test('an ID Telegram does not know is skipped quietly, but a real failure still warns', async () => {
+  const rows = {
+    GroupRegistry: [{ GroupChatID: '-1' }],
+    Users: [{ TelegramUserID: '7' }, { TelegramUserID: '8' }],
+    GroupMembers: [],
+  };
+  const store = {
+    rows: async (key) => rows[key],
+    upsertGroupMember: async () => {},
+    groupSnapshot: async () => [{ groupChatId: '-1', members: [] }],
+  };
+  const failWith = (message) => async (token, chat, id) => {
+    if (id === '7') throw new Error(`Telegram getChatMember failed: ${message}`);
+    return { status: 'left', user: { id: Number(id) } };
+  };
+  const api = (getChatMember) => ({
+    getMe: async () => ({ id: 99, username: 'project_bot' }),
+    getChatAdministrators: async () => [],
+    getChatMember,
+    getChatMemberCount: async () => 1,
+  });
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const run = (getChatMember) =>
+      refreshGroupMembers({ store, token: 't', groupChatId: '-1', api: api(getChatMember) });
+    assert.equal(
+      (await run(failWith('Bad Request: user not found'))).groups[0].discoveryWarning,
+      '',
+    );
+    assert.match(
+      (await run(failWith('Too Many Requests: retry after 5'))).groups[0].discoveryWarning,
+      /could not be checked/,
+    );
+  } finally {
+    console.warn = warn;
+  }
+});
