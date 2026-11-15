@@ -19,12 +19,13 @@ test('web bridge assigns a group role and creates a linked project shell', async
   const members = [{ GroupChatID: '-456', TelegramUserID: '123', TelegramName: 'Asha', MembershipStatus: 'Active', AssignedName: '', AssignedRole: '', rowNumber: 2 }];
   const projects = [];
   const tasks=[];
-  const requests=[{RequestID:'req',GroupChatID:'-456',SourceMessageID:'10',AttachmentsJSON:JSON.stringify([{type:'Photo',fileId:'photo'}]),rowNumber:2}];
+  const requests=[{RequestID:'req',GroupChatID:'-456',SourceMessageID:'10',AttachmentsJSON:JSON.stringify([{type:'Photo',fileId:'photo'}]),rowNumber:2},{RequestID:'voice',GroupChatID:'-456',SourceMessageID:'11',OriginalSenderName:'Asha',AttachmentsJSON:JSON.stringify([{type:'voice',fileId:'voice-file'}]),rowNumber:3}];
   const store = {
     upsertGroupMember: async()=>{},
     groupSnapshot: async()=>[{groupChatId:'-456',title:'Site Group',status:'Available',members:[]}],
     rows: async (sheet) => ({ GroupRegistry: groups, GroupMembers: members, Projects: projects, DecisionRequests:requests,Tasks:tasks }[sheet] || []),
     assignGroupRole: async ({ name, role }) => { members[0].AssignedName = name; members[0].AssignedRole = role; return true; },
+    user: async (id) => (['7001','7002'].includes(String(id)) ? { TelegramUserID: id } : undefined),
     tasksForProject:async(id)=>tasks.filter(t=>t.ProjectID===id),
     projectForGroup: async (id) => projects.find((project) => project.GroupChatID === id),
     onboardingForMember: async () => null,
@@ -34,7 +35,13 @@ test('web bridge assigns a group role and creates a linked project shell', async
     audit: async () => {}, markGroupLinked: async () => {},
   };
   const sent = [];
+  const voices = [];
   globalThis.fetch = async (url, options) => {
+    if (String(url).endsWith('/sendVoice')) {
+      const input = JSON.parse(options.body);
+      if (input.chat_id === '7002') return Response.json({ok:false,description:'Forbidden'},{status:403}); // has not pressed Start on the bot
+      voices.push(input);return Response.json({ok:true,result:{message_id:2}});
+    }
     if (String(url).endsWith('/getMe')) return Response.json({ok:true,result:{id:99,username:'test_bot'}});
     if (String(url).endsWith('/getChatMemberCount')) return Response.json({ok:true,result:2});
     if (String(url).endsWith('/getChatAdministrators')) return Response.json({ok:true,result:[]});
@@ -60,6 +67,12 @@ test('web bridge assigns a group role and creates a linked project shell', async
     assert.equal((await post(content,{...query,groupChatId:'-999'})).status,404);
     assert.equal((await post(content,{...query,attachmentIndex:1})).status,404);
     assert.equal(Buffer.from((await post(content,query)).body.bytes,'base64').toString(),'PHOTO');
+    const voice='/api/integrations/web/decisions/voice',note={requestId:'voice',groupChatId:'-456',telegramUserIds:['7001','7002','7003']};
+    assert.equal((await post(voice,note,false)).status,401);
+    assert.equal((await post(voice,{...note,telegramUserIds:['x']})).status,400);
+    assert.equal((await post(voice,{...note,requestId:'req'})).body.sent,0);
+    assert.equal((await post(voice,note)).body.sent,1);
+    assert.deepEqual(voices,[{chat_id:'7001',voice:'voice-file',caption:'Voice message from Asha'}]);
     const reply={requestId:'req',groupChatId:'-456',response:'Hello <literal>'};
     assert.equal((await post(publish,reply)).body.result.message_id,1);
     assert.equal(sent[0].text,'Hello <literal>');assert.equal(sent[0].parse_mode,undefined);assert.equal(sent[0].reply_parameters.message_id,10);

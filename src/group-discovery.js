@@ -29,7 +29,16 @@ export async function refreshGroupMembers({ store, token, groupChatId, telegramU
       if (String(me.id) === id) continue;
       let member;
       try { member = await api.getChatMember(token, chatId, id); }
-      catch (error) { if (telegramUserId) throw error; warnings.push('Some known memberships could not be checked. Refresh again.'); continue; }
+      catch (error) {
+        if (telegramUserId) throw error;
+        // Telegram does not know this ID (a deleted, test or never-used account), so they cannot be in this group:
+        // not worth a warning that pressing Refresh again can never clear.
+        if (!/user not found|PARTICIPANT_ID_INVALID/i.test(error.message)) {
+          console.warn(`Membership check failed for ${id} in ${chatId}: ${error.message}`);
+          warnings.push('Some known memberships could not be checked. Refresh again.');
+        }
+        continue;
+      }
       if (telegramUserId && (!activeMembership(member) || member.user.is_bot)) throw new Error('This person is not an active human member of this group.');
       if (!member.user?.is_bot && (activeMembership(member) || members.some(row => String(row.GroupChatID) === chatId && String(row.TelegramUserID) === id))) await store.upsertGroupMember(chatId, member.user, activeMembership(member) ? 'Active' : 'Left');
     }

@@ -16,6 +16,10 @@ export const sendPhoto = (token, chatId, photo, caption = '') => api(token, 'sen
 export const sendDocument = (token, chatId, document, caption = '') => api(token, 'sendDocument', {
   chat_id: chatId, document, ...(caption ? { caption, parse_mode: 'HTML' } : {}),
 });
+// `voice` is a file_id from this same bot, so the recording is re-sent without downloading it.
+export const sendVoice = (token, chatId, voice, caption = '') => api(token, 'sendVoice', {
+  chat_id: chatId, voice, ...(caption ? { caption } : {}),
+});
 export const answerCallback = (token, callbackId, text = '') => api(token, 'answerCallbackQuery', { callback_query_id: callbackId, text });
 export const getUpdates = (token, offset) => api(token, 'getUpdates', { offset, timeout: 25, allowed_updates: ['message', 'callback_query', 'chat_member', 'my_chat_member'] });
 export const getMe = (token) => api(token, 'getMe');

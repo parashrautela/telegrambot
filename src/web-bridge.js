@@ -7,7 +7,7 @@ import http from 'node:http';
 import { loadTelegramAttachment } from './telegram-media.js';
 import { timingSafeEqual } from 'node:crypto';
 import { createProjectShell, assignWorkflowToProject } from './project-service.js';
-import { getChatMember, getMe, sendMessage } from './telegram.js';
+import { getChatMember, getMe, sendMessage, sendVoice } from './telegram.js';
 
 import { downloadProjectResource } from './drive-storage.js';
 import { BLANK_WORKFLOW_ID, WORKFLOW_OPTIONS } from './schema.js';
@@ -292,11 +292,27 @@ export function startWebBridge({ store, token, founderTelegramId }) {
           return respond(res, 200, { ...summary, tasks: await store.tasksForProject(project.ProjectID) });
         } finally { if (apply) startingProjects.delete(lockKey); }
       }
-      if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/publish','/api/integrations/web/decisions/notify'].includes(req.url)) {
+      if (req.method === 'POST' && ['/api/integrations/web/decisions/content','/api/integrations/web/decisions/voice','/api/integrations/web/decisions/publish','/api/integrations/web/decisions/notify'].includes(req.url)) {
         const input = await readBody(req);
         const request = (await store.rows('DecisionRequests')).find(row => row.RequestID === input.requestId && String(row.GroupChatID) === String(input.groupChatId));
         if (!request) return respond(res,404,{error:'Request not found in the linked group.'});
         if (req.url.endsWith('/notify')) return respond(res,200,await notifyQuery({ store, request, input, token }));
+        if (req.url.endsWith('/voice')) {
+          const ids = input.telegramUserIds;
+          if (!Array.isArray(ids) || !ids.length || ids.length > 10 || ids.some(id => !/^\d+$/.test(String(id)))) return respond(res,400,{error:'Invalid founder list.'});
+          const voices = JSON.parse(request.AttachmentsJSON || '[]').filter(item => item.type === 'voice');
+          const project = await store.projectForGroup(String(request.GroupChatID));
+          const caption = `Voice message from ${request.OriginalSenderName || 'a client'}${project ? ` · ${project.ProjectName}` : ''}`;
+          let sent = 0;
+          for (const id of ids) {
+            if (!(await store.user(String(id)))) continue;
+            for (const voice of voices) {
+              try { await sendVoice(token, id, voice.fileId, caption); sent++; }
+              catch { /* Telegram refuses until that founder has pressed Start on this bot; the web inbox still has the note. */ }
+            }
+          }
+          return respond(res,200,{sent});
+        }
         if (req.url.endsWith('/content')) {
           const attachments = JSON.parse(request.AttachmentsJSON || '[]');
           if (!Number.isInteger(input.attachmentIndex) || input.attachmentIndex < 0 || !attachments[input.attachmentIndex]) return respond(res,404,{error:'Attachment not found.'});
