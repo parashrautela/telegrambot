@@ -6,8 +6,9 @@ export async function loadTelegramAttachment(attachment, token, fetchImpl = fetc
   try {
     const lookup = await fetchImpl(`https://api.telegram.org/bot${token}/getFile`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({file_id:attachment.fileId}),signal:AbortSignal.timeout(10000),redirect:'error'});
     const info = await lookup.json(); const file = info.result;
+    if (/too big/i.test(info.description || '')) throw new ApiError('File is over 20 MB, so Telegram won’t hand it to the bot. Ask for a smaller copy.',413);
     if (!info.ok || !file?.file_path || !/^[\w./-]+$/.test(file.file_path) || file.file_path.split('/').includes('..')) throw new ApiError('Telegram attachment unavailable.',502);
-    if (file.file_size > maximum) throw new ApiError('Attachment exceeds the 20 MB pilot limit.',413);
+    if (file.file_size > maximum) throw new ApiError('File is over 20 MB, so Telegram won’t hand it to the bot. Ask for a smaller copy.',413);
     const response = await fetchImpl(`https://api.telegram.org/file/bot${token}/${file.file_path}`,{signal:AbortSignal.timeout(20000),redirect:'error'});
     if (!response.ok || !response.body) throw new ApiError('Telegram attachment unavailable.',502);
     if (Number(response.headers.get('content-length')) > maximum) { await response.body.cancel(); throw new ApiError('Attachment too large.',413); }

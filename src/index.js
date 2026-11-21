@@ -10,7 +10,6 @@ import { SheetStore } from './sheets.js';
 import { WORKFLOW_OPTIONS } from './schema.js';
 import { applyReviewDecision, completionBlockReason, createDraftRevision, dependencyEdges, forecastDelayImpact, parseUserDate, previewTradeOrderOverride, projectedFinish, resolveDrawing, withForecastDefaults } from './workflow-engine.js';
 import { GROUP_COMMANDS, answerCallback, getChatAdministrators, getChatMember, getMe, poll, sendDocument, sendMessage, sendPhoto, setMyCommands } from './telegram.js';
-import { archiveProjectResource } from './drive-storage.js';
 import { retryProjectResources } from './project-resources.js';
 import { startWebBridge } from './web-bridge.js';
 
@@ -225,7 +224,7 @@ async function requestClientResources(project, workflow) {
 }
 
 async function handleProjectResourceUpload(message) {
-  if (!groupOnly(message.chat) || (!message.document && !message.photo?.length)) return;
+  if (!groupOnly(message.chat) || (!message.document && !message.photo?.length && !message.video)) return;
   const project = await store.projectForGroup(message.chat.id);
   if (!project || ['Completed', 'Abandoned'].includes(project.Status)) return;
   const user = actor(message.from);
@@ -233,20 +232,20 @@ async function handleProjectResourceUpload(message) {
   const maySubmit = String(message.from.id) === config.founderTelegramId || (roster?.MembershipStatus === 'Active' && Boolean(roster.AssignedRole));
   if (!maySubmit) return;
   const task = (await store.tasksForProject(project.ProjectID)).find((item) => item.Stage === 'Resources' && item.Status !== 'Completed');
-  const document = message.document;
+  const document = message.document, video = message.video;
   const photo = message.photo?.at(-1);
-  const resourceType = document ? 'Document' : 'Photo';
-  const fileId = document?.file_id || photo?.file_id;
-  const fileName = (document?.file_name || `photo-${message.message_id}.jpg`).slice(0,200);
+  const resourceType = document ? 'Document' : video ? 'Video' : 'Photo';
+  const fileId = document?.file_id || video?.file_id || photo?.file_id;
+  const fileName = (document?.file_name || video?.file_name || `${video ? 'video' : 'photo'}-${message.message_id}.${video ? 'mp4' : 'jpg'}`).slice(0,200);
   const submission = await store.saveSubmittedResource({
     projectId: project.ProjectID, taskId: task?.TaskID || '', groupChatId: message.chat.id, user,
-    resourceType, fileId, fileName, caption: message.caption || '', sourceMessageId: message.message_id, mimeType: document?.mime_type || 'image/jpeg',
+    resourceType, fileId, fileName, caption: message.caption || '', sourceMessageId: message.message_id, mimeType: document?.mime_type || (video ? video.mime_type || 'video/mp4' : 'image/jpeg'),
   });
   if (!submission.created) return;
   if (task) await store.updateRow('Tasks',task.rowNumber,{Status:'Resources received — Review needed',LastUpdatedAt:new Date().toISOString(),LastUpdatedBy:String(user.id)});
   await store.audit({projectId:project.ProjectID,taskId:task?.TaskID || '',action:'Project resource submitted',actor:user.id,actorName:user.name,source:'Telegram group bot',details:`${resourceType}: ${fileName}`});
-  await sendMessage(config.groupToken,message.chat.id,`✅ ${escape(fileName)} is logged for this project and queued for automatic Google Drive storage. Check Files in the web app for its save status.`);
-  retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.'));
+  await sendMessage(config.groupToken,message.chat.id,`✅ ${escape(fileName)} is logged for this project and will be saved to the studio’s Google Drive. Check Files in the web app for its save status.`);
+  retryProjectResources(store).catch(()=>console.warn('Project file storage retry pending.'));
 
 }
 
@@ -1065,5 +1064,5 @@ poll(config.leaderToken, 'Founder bot', async (update) => {
   if (update.callback_query) await leaderCallback(update.callback_query);
 });
 
-setInterval(()=>retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.')),60000);
-retryProjectResources(store,archiveProjectResource).catch(()=>console.warn('Project file storage retry pending.'));
+setInterval(()=>retryProjectResources(store).catch(()=>console.warn('Project file storage retry pending.')),60000);
+retryProjectResources(store).catch(()=>console.warn('Project file storage retry pending.'));
