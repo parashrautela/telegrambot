@@ -10,7 +10,6 @@ import { timingSafeEqual } from 'node:crypto';
 import { createProjectShell, assignWorkflowToProject } from './project-service.js';
 import { getChatMember, getMe, sendMessage, sendVoice } from './telegram.js';
 
-import { downloadProjectResource } from './drive-storage.js';
 import { BLANK_WORKFLOW_ID, WORKFLOW_OPTIONS } from './schema.js';
 import { projectedFinish, rescheduleTasks, withForecastDefaults } from './workflow-engine.js';
 import { STAGE_WORKFLOW_ID, buildStagePlan, defaultPlanStages, insertStageTask, editStageTask, renameStage, planTaskAction, scheduleSentence } from './stage-plan.js';
@@ -443,9 +442,9 @@ export function startWebBridge({ store, token, founderTelegramId }) {
         if(!project)return respond(res,404,{error:'Project not found.'});
         const files=(await store.rows('SubmittedResources')).filter((row)=>row.ProjectID===project.ProjectID);
         if(req.url.endsWith('/content')) {
-          const file=files.find((row)=>row.SubmissionID===input.submissionId && row.DriveStatus==='Stored');
-          if(!file)return respond(res,404,{error:'Stored file not found.'});
-          const bytes=await downloadProjectResource(file.DriveFileID);
+          const file=files.find((row)=>row.SubmissionID===input.submissionId);
+          if(!file)return respond(res,404,{error:'File not found.'});
+          const {bytes}=await loadTelegramAttachment({fileId:file.TelegramFileID,type:file.ResourceType,mimeType:file.MimeType},token);
           return respond(res,200,{bytes:bytes.toString('base64'),mimeType:file.MimeType || 'application/octet-stream'});
         }
         return respond(res,200,{files});
